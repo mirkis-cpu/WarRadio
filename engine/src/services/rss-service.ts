@@ -39,11 +39,12 @@ const DEFAULT_WAR_KEYWORDS = [
 ];
 
 const DEFAULT_FEEDS: FeedConfig[] = [
-  { url: 'https://feeds.reuters.com/reuters/worldNews', name: 'Reuters World', enabled: true },
   { url: 'https://rss.nytimes.com/services/xml/rss/nyt/World.xml', name: 'NYT World', enabled: true },
   { url: 'https://feeds.bbci.co.uk/news/world/rss.xml', name: 'BBC World', enabled: true },
   { url: 'https://www.aljazeera.com/xml/rss/all.xml', name: 'Al Jazeera', enabled: true },
   { url: 'https://feeds.theguardian.com/theguardian/world/rss', name: 'Guardian World', enabled: true },
+  { url: 'https://rss.dw.com/xml/rss-en-world', name: 'DW World', enabled: true },
+  { url: 'https://news.google.com/rss/search?q=war+OR+conflict+OR+military&hl=en-US&gl=US&ceid=US:en', name: 'Google News War', enabled: true },
 ];
 
 const SEEN_IDS_MAX_DEFAULT = 5000;
