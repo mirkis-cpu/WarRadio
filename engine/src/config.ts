@@ -11,7 +11,8 @@ const envSchema = z.object({
   SUNO_HEADLESS: z.coerce.boolean().default(true),
   SUNO_CAPTCHA_MODE: z.enum(['manual', '2captcha', 'skip']).default('manual'),
   CAPTCHA_2_API_KEY: z.string().optional(),
-  YOUTUBE_RTMP_URL: z.string().optional(),
+  YOUTUBE_RTMP_URL: z.string().default('rtmp://a.rtmp.youtube.com/live2'),
+  YOUTUBE_STREAM_KEY: z.string().optional(),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

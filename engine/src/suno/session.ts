@@ -76,13 +76,18 @@ export class SunoSession {
     let page: Page | null = null;
     try {
       page = await this.context.newPage();
-      await page.goto(`${SUNO_BASE_URL}/`, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await page.goto(`${SUNO_BASE_URL}/create`, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await sleep(5_000); // Wait for React SPA to render
 
-      // Check for authenticated state: user avatar or "Create" button in nav
-      const isAuthed = await page.locator('[data-testid="user-avatar"], button:has-text("Create")').first().isVisible({ timeout: 5000 }).catch(() => false);
+      // Suno v5: check for profile menu button (shows username + credits) or Create/Custom buttons
+      const isAuthed = await page.locator(
+        '[data-testid="profile-menu-button"], button:has-text("credits"), button:has-text("Custom"), button:has-text("Simple")',
+      ).first().isVisible({ timeout: 12_000 }).catch(() => false);
 
-      // Also check we're not on a login page
-      const isLoginPage = await page.locator('input[type="email"], button:has-text("Sign in")').first().isVisible({ timeout: 3000 }).catch(() => false);
+      // Also check we're not on a login/landing page
+      const isLoginPage = await page.locator(
+        'button:has-text("Sign In"), button:has-text("Sign Up"), button:has-text("Log in")',
+      ).first().isVisible({ timeout: 3000 }).catch(() => false);
 
       logger.info({ isAuthed, isLoginPage }, 'Session verification result');
       return isAuthed && !isLoginPage;

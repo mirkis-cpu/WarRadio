@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { Server as SocketIOServer } from 'socket.io';
+import { getPipeline } from '../services/pipeline.js';
 
 // Engine state
 let engineStatus: 'stopped' | 'starting' | 'running' | 'paused' | 'error' = 'stopped';
@@ -45,5 +46,32 @@ export function registerEngineRoutes(fastify: FastifyInstance, io: SocketIOServe
       setEngineStatus('running', io);
     }
     return { status: engineStatus };
+  });
+
+  // ── Stream routes ────────────────────────────────────────────────────────
+
+  fastify.get('/api/v1/stream/status', async () => {
+    const pipeline = getPipeline();
+    const stream = pipeline.getStreamStatus();
+    return stream ?? { isStreaming: false, startedAt: null, currentTrack: null, tracksPlayed: 0, uptimeSeconds: 0, errors: 0 };
+  });
+
+  fastify.post('/api/v1/stream/start', async (_req, reply) => {
+    const pipeline = getPipeline();
+    try {
+      await pipeline.startStream();
+      io.emit('stream:status-changed', { isStreaming: true });
+      return { status: 'started' };
+    } catch (err) {
+      reply.status(400);
+      return { error: String(err) };
+    }
+  });
+
+  fastify.post('/api/v1/stream/stop', async () => {
+    const pipeline = getPipeline();
+    pipeline.stopStream();
+    io.emit('stream:status-changed', { isStreaming: false });
+    return { status: 'stopped' };
   });
 }

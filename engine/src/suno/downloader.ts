@@ -45,14 +45,18 @@ async function fetchToFile(url: string, outputPath: string): Promise<void> {
     },
   });
 
+  const status = response.status;
+  const contentType = response.headers.get('content-type') ?? '';
+  const contentLength = response.headers.get('content-length') ?? 'unknown';
+  logger.debug({ url, status, contentType, contentLength }, 'Download response received');
+
   if (!response.ok) {
     throw new DownloadError(
       `HTTP ${response.status} ${response.statusText} when downloading ${url}`,
     );
   }
 
-  const contentType = response.headers.get('content-type') ?? '';
-  if (contentType && !contentType.includes('audio') && !contentType.includes('octet-stream')) {
+  if (contentType && !contentType.includes('audio') && !contentType.includes('octet-stream') && !contentType.includes('video')) {
     logger.warn({ contentType, url }, 'Unexpected content-type for audio download');
   }
 
@@ -61,6 +65,7 @@ async function fetchToFile(url: string, outputPath: string): Promise<void> {
   }
 
   const buffer = await response.arrayBuffer();
+  logger.debug({ url, bytes: buffer.byteLength }, 'Download buffer received');
   await fs.writeFile(outputPath, Buffer.from(buffer));
 }
 

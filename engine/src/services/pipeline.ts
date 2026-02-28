@@ -9,6 +9,7 @@ import { TtsService } from './tts-service.js';
 import { SunoSession } from '../suno/session.js';
 import { SunoGenerator } from '../suno/generator.js';
 import { downloadAudio } from '../suno/downloader.js';
+import { StreamManager, type StreamStatus } from './stream-manager.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -17,8 +18,8 @@ import { downloadAudio } from '../suno/downloader.js';
 /** How many songs to generate per cycle (10 songs × ~3min = ~30min of content) */
 const SONGS_PER_CYCLE = 10;
 
-/** Interval between production cycles (30 minutes) */
-const CYCLE_INTERVAL_MS = 30 * 60 * 1000;
+/** Interval between production cycles (6x/day = every 4 hours) */
+const CYCLE_INTERVAL_MS = 4 * 60 * 60 * 1000;
 
 /** Max concurrent Suno generation requests */
 const SUNO_CONCURRENCY = 2;
@@ -50,6 +51,7 @@ export interface PipelineStatus {
   totalSongsGenerated: number;
   totalNewsBlocksGenerated: number;
   currentPhase: string;
+  stream: StreamStatus | null;
 }
 
 export interface CycleResult {
@@ -70,8 +72,14 @@ export class Pipeline {
   private readonly ttsService: TtsService;
   private sunoSession: SunoSession | null = null;
   private sunoGenerator: SunoGenerator | null = null;
+  private streamManager: StreamManager | null = null;
 
+  /** Queue of tracks to play — new songs go here first */
   private readonly audioBuffer: AudioBufferEntry[] = [];
+  /** Archive of all played tracks — used for looping when buffer is empty */
+  private readonly playedArchive: AudioBufferEntry[] = [];
+  /** Position in the archive for round-robin replay */
+  private archivePosition = 0;
 
   private running = false;
   private pendingGeneration = 0;
@@ -112,6 +120,9 @@ export class Pipeline {
       void this.generateNewsBlock();
     }, NEWS_BLOCK_INTERVAL_MS);
 
+    // Start RTMP stream if YouTube is configured
+    await this.initStream();
+
     // Run first cycle immediately, then schedule repeats
     logger.info('Pipeline running — starting first production cycle');
     void this.runCycleLoop();
@@ -120,6 +131,12 @@ export class Pipeline {
   async stop(): Promise<void> {
     this.running = false;
     this.currentPhase = 'stopping';
+
+    // Stop stream
+    if (this.streamManager) {
+      this.streamManager.stop();
+      this.streamManager = null;
+    }
 
     if (this.cycleTimer) {
       clearTimeout(this.cycleTimer);
@@ -152,11 +169,33 @@ export class Pipeline {
       totalSongsGenerated: this.totalSongsGenerated,
       totalNewsBlocksGenerated: this.totalNewsBlocksGenerated,
       currentPhase: this.currentPhase,
+      stream: this.streamManager?.getStatus() ?? null,
     };
   }
 
+  /**
+   * Get next track to play.
+   * Priority: new tracks from buffer first, then loop through archive.
+   */
   dequeueAudio(): AudioBufferEntry | null {
-    return this.audioBuffer.shift() ?? null;
+    // 1. Fresh tracks have priority
+    if (this.audioBuffer.length > 0) {
+      const track = this.audioBuffer.shift()!;
+      // Archive songs for replay (not news blocks — those are time-sensitive)
+      if (track.type === 'song') {
+        this.playedArchive.push(track);
+      }
+      return track;
+    }
+
+    // 2. Loop through archive when no new tracks
+    if (this.playedArchive.length === 0) {
+      return null;
+    }
+
+    const track = this.playedArchive[this.archivePosition % this.playedArchive.length];
+    this.archivePosition++;
+    return track;
   }
 
   peekBuffer(): AudioBufferEntry[] {
@@ -433,6 +472,61 @@ export class Pipeline {
       );
     } catch (err) {
       logger.error({ err }, 'News block generation failed');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Stream control (public — used by API routes)
+  // ---------------------------------------------------------------------------
+
+  async startStream(): Promise<void> {
+    if (this.streamManager) {
+      logger.warn('Stream already running');
+      return;
+    }
+
+    const config = getConfig();
+    if (!config.YOUTUBE_STREAM_KEY) {
+      throw new Error('YOUTUBE_STREAM_KEY not configured. Set it in .env file.');
+    }
+
+    this.streamManager = new StreamManager({
+      rtmpUrl: config.YOUTUBE_RTMP_URL,
+      streamKey: config.YOUTUBE_STREAM_KEY,
+      backgroundImage: path.join(config.MEDIA_DIR, 'background.png'),
+    });
+
+    void this.streamManager.startStreaming(() => this.dequeueAudio());
+    logger.info('Stream started via API');
+  }
+
+  stopStream(): void {
+    if (this.streamManager) {
+      this.streamManager.stop();
+      this.streamManager = null;
+      logger.info('Stream stopped via API');
+    }
+  }
+
+  getStreamStatus(): StreamStatus | null {
+    return this.streamManager?.getStatus() ?? null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Stream initialization (auto-start if configured)
+  // ---------------------------------------------------------------------------
+
+  private async initStream(): Promise<void> {
+    const config = getConfig();
+    if (!config.YOUTUBE_STREAM_KEY) {
+      logger.info('YOUTUBE_STREAM_KEY not set — stream disabled. Set it in .env to enable.');
+      return;
+    }
+
+    try {
+      await this.startStream();
+    } catch (err) {
+      logger.error({ err }, 'Failed to auto-start stream');
     }
   }
 
