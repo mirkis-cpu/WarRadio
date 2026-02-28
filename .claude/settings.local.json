@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:docs.sunoapi.org)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:rss.feedspot.com)",
+      "WebFetch(domain:www.cnn.com)",
+      "WebFetch(domain:hashnode.com)",
+      "WebFetch(domain:newsloth.com)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:www.host-stage.net)",
+      "WebFetch(domain:www.videosdk.live)",
+      "WebFetch(domain:ffmpeg-user.ffmpeg.narkive.com)",
+      "WebFetch(domain:ottverse.com)",
+      "WebFetch(domain:transloadit.com)",
+      "Bash(node:*)",
+      "Bash(npx playwright:*)",
+      "Bash(brew list:*)",
+      "Bash(python3:*)",
+      "Bash(npm install:*)",
+      "Bash(npx create-next-app@latest:*)",
+      "Bash(mv:*)"
+    ]
+  }
+}

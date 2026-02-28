@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.next/
+.env
+*.db
+*.db-journal
+engine/media/songs/*
+engine/media/podcasts/*
+engine/media/ads/*
+engine/media/news/*
+engine/data/sessions/*
+engine/data/*.json
+!.gitkeep
