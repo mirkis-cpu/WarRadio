@@ -4,31 +4,31 @@ import { getConfig } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { sleep } from '../utils/sleep.js';
 import { RssService, type NewsArticle } from './rss-service.js';
-import { LyricsService, type GeneratedLyrics } from './lyrics-service.js';
+import { LyricsService, type GeneratedLyrics, type SynthesizedStory } from './lyrics-service.js';
 import { TtsService } from './tts-service.js';
 import { SunoSession } from '../suno/session.js';
 import { SunoGenerator } from '../suno/generator.js';
 import { downloadAudio } from '../suno/downloader.js';
 
-// Pipeline configuration constants
-const LYRICS_QUEUE_MAX = 10;
-const AUDIO_BUFFER_MIN = 3;
-const AUDIO_BUFFER_TARGET = 6;
-const PIPELINE_LOOP_INTERVAL_MS = 30_000; // 30 seconds
-const NEWS_BLOCK_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
 
-const FILLER_TOPICS: string[] = [
-  'ongoing conflicts reshaping borders',
-  'the human cost of modern warfare',
-  'soldiers returning home changed',
-  'civilians caught in the crossfire',
-  'resistance in occupied territories',
-  'war correspondents on the frontline',
-  'the economics of arms dealing',
-  'refugees rebuilding after conflict',
-  'propaganda versus ground truth',
-  'the silence after a ceasefire',
-];
+/** How many songs to generate per cycle (10 songs × ~3min = ~30min of content) */
+const SONGS_PER_CYCLE = 10;
+
+/** Interval between production cycles (30 minutes) */
+const CYCLE_INTERVAL_MS = 30 * 60 * 1000;
+
+/** Max concurrent Suno generation requests */
+const SUNO_CONCURRENCY = 2;
+
+/** News block (TTS) interval */
+const NEWS_BLOCK_INTERVAL_MS = 15 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 export interface AudioBufferEntry {
   id: string;
@@ -42,13 +42,27 @@ export interface AudioBufferEntry {
 
 export interface PipelineStatus {
   running: boolean;
-  lyricsQueueSize: number;
+  cycleNumber: number;
+  lastCycleAt: Date | null;
+  nextCycleAt: Date | null;
   audioBufferSize: number;
   pendingGeneration: number;
-  lastRssFetch: Date | null;
   totalSongsGenerated: number;
   totalNewsBlocksGenerated: number;
+  currentPhase: string;
 }
+
+export interface CycleResult {
+  articlesScraped: number;
+  storiesSynthesized: number;
+  lyricsGenerated: number;
+  songsProduced: number;
+  errors: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline
+// ---------------------------------------------------------------------------
 
 export class Pipeline {
   private readonly rssService: RssService;
@@ -57,15 +71,17 @@ export class Pipeline {
   private sunoSession: SunoSession | null = null;
   private sunoGenerator: SunoGenerator | null = null;
 
-  private readonly lyricsQueue: GeneratedLyrics[] = [];
   private readonly audioBuffer: AudioBufferEntry[] = [];
 
   private running = false;
   private pendingGeneration = 0;
-  private lastRssFetch: Date | null = null;
+  private cycleNumber = 0;
+  private lastCycleAt: Date | null = null;
+  private nextCycleAt: Date | null = null;
   private totalSongsGenerated = 0;
   private totalNewsBlocksGenerated = 0;
-  private loopTimer: NodeJS.Timeout | null = null;
+  private currentPhase = 'idle';
+  private cycleTimer: NodeJS.Timeout | null = null;
   private newsBlockTimer: NodeJS.Timeout | null = null;
 
   constructor() {
@@ -74,7 +90,10 @@ export class Pipeline {
     this.ttsService = new TtsService();
   }
 
-  /** Start the full pipeline: RSS polling, lyrics gen, audio gen. */
+  // ---------------------------------------------------------------------------
+  // Public API
+  // ---------------------------------------------------------------------------
+
   async start(): Promise<void> {
     if (this.running) {
       logger.warn('Pipeline already running');
@@ -82,41 +101,29 @@ export class Pipeline {
     }
 
     this.running = true;
+    this.currentPhase = 'initializing';
     logger.info('Pipeline starting');
 
     // Initialize Suno browser session
     await this.initSuno();
-
-    // Wire up RSS events
-    this.rssService.on('articles', (articles: NewsArticle[]) => {
-      void this.handleNewArticles(articles);
-    });
-    this.rssService.on('error', (err: Error, feedName: string) => {
-      logger.error({ err, feedName }, 'RSS feed error');
-    });
-
-    this.rssService.start();
 
     // Schedule periodic news blocks via TTS
     this.newsBlockTimer = setInterval(() => {
       void this.generateNewsBlock();
     }, NEWS_BLOCK_INTERVAL_MS);
 
-    // Start main production loop
-    void this.productionLoop();
-
-    logger.info('Pipeline running');
+    // Run first cycle immediately, then schedule repeats
+    logger.info('Pipeline running — starting first production cycle');
+    void this.runCycleLoop();
   }
 
-  /** Stop the pipeline gracefully. */
   async stop(): Promise<void> {
     this.running = false;
+    this.currentPhase = 'stopping';
 
-    this.rssService.stop();
-
-    if (this.loopTimer) {
-      clearTimeout(this.loopTimer);
-      this.loopTimer = null;
+    if (this.cycleTimer) {
+      clearTimeout(this.cycleTimer);
+      this.cycleTimer = null;
     }
 
     if (this.newsBlockTimer) {
@@ -130,135 +137,210 @@ export class Pipeline {
       this.sunoGenerator = null;
     }
 
+    this.currentPhase = 'idle';
     logger.info('Pipeline stopped');
   }
 
-  /** Get current pipeline status. */
   getStatus(): PipelineStatus {
     return {
       running: this.running,
-      lyricsQueueSize: this.lyricsQueue.length,
+      cycleNumber: this.cycleNumber,
+      lastCycleAt: this.lastCycleAt,
+      nextCycleAt: this.nextCycleAt,
       audioBufferSize: this.audioBuffer.length,
       pendingGeneration: this.pendingGeneration,
-      lastRssFetch: this.lastRssFetch,
       totalSongsGenerated: this.totalSongsGenerated,
       totalNewsBlocksGenerated: this.totalNewsBlocksGenerated,
+      currentPhase: this.currentPhase,
     };
   }
 
-  /** Pop the next audio item from the buffer for playback. */
   dequeueAudio(): AudioBufferEntry | null {
     return this.audioBuffer.shift() ?? null;
   }
 
-  /** Peek at the buffer without consuming. */
   peekBuffer(): AudioBufferEntry[] {
     return [...this.audioBuffer];
   }
 
+  /**
+   * Run a single production cycle manually (for testing).
+   */
+  async runSingleCycle(): Promise<CycleResult> {
+    return this.runProductionCycle();
+  }
+
   // ---------------------------------------------------------------------------
-  // Private: production loop
+  // Production cycle loop
   // ---------------------------------------------------------------------------
 
-  private async productionLoop(): Promise<void> {
+  private async runCycleLoop(): Promise<void> {
     while (this.running) {
       try {
-        await this.tick();
+        const result = await this.runProductionCycle();
+        logger.info(
+          {
+            cycle: this.cycleNumber,
+            scraped: result.articlesScraped,
+            stories: result.storiesSynthesized,
+            lyrics: result.lyricsGenerated,
+            songs: result.songsProduced,
+            errors: result.errors.length,
+          },
+          'Production cycle complete',
+        );
       } catch (err) {
-        logger.error({ err }, 'Pipeline production loop error');
+        logger.error({ err, cycle: this.cycleNumber }, 'Production cycle failed');
       }
 
-      await sleep(PIPELINE_LOOP_INTERVAL_MS);
-    }
-  }
+      if (!this.running) break;
 
-  private async tick(): Promise<void> {
-    const bufferSize = this.audioBuffer.length;
-    const queueSize = this.lyricsQueue.length;
-
-    logger.debug(
-      { bufferSize, queueSize, pendingGeneration: this.pendingGeneration },
-      'Pipeline tick',
-    );
-
-    // If buffer is not satisfied and we have lyrics, generate audio
-    if (bufferSize < AUDIO_BUFFER_TARGET && queueSize > 0 && this.pendingGeneration < 2) {
-      const lyrics = this.lyricsQueue.shift()!;
-      void this.generateSongFromLyrics(lyrics);
-      return;
-    }
-
-    // If buffer is critical and no pending lyrics and no pending generation, use filler
-    if (bufferSize < AUDIO_BUFFER_MIN && queueSize === 0 && this.pendingGeneration === 0) {
-      logger.warn(
-        { bufferSize, minBuffer: AUDIO_BUFFER_MIN },
-        'Buffer critical — generating filler song',
+      // Schedule next cycle
+      this.nextCycleAt = new Date(Date.now() + CYCLE_INTERVAL_MS);
+      logger.info(
+        { nextCycleAt: this.nextCycleAt.toISOString() },
+        `Next production cycle in ${CYCLE_INTERVAL_MS / 60000} minutes`,
       );
-      void this.generateFillerSong();
-      return;
-    }
 
-    // Proactively fetch more lyrics if queue is low
-    if (queueSize < 3) {
-      void this.fetchMoreLyrics();
+      await sleep(CYCLE_INTERVAL_MS);
     }
   }
 
   // ---------------------------------------------------------------------------
-  // Private: article handling
+  // Single production cycle: Scrape → Synthesize → Lyrics → Songs
   // ---------------------------------------------------------------------------
 
-  private async handleNewArticles(articles: NewsArticle[]): Promise<void> {
-    this.lastRssFetch = new Date();
-    logger.info({ count: articles.length }, 'New articles received from RSS');
+  private async runProductionCycle(): Promise<CycleResult> {
+    this.cycleNumber++;
+    this.lastCycleAt = new Date();
+    const errors: string[] = [];
 
-    for (const article of articles) {
-      if (this.lyricsQueue.length >= LYRICS_QUEUE_MAX) {
-        logger.debug('Lyrics queue full, skipping article');
-        break;
-      }
+    // ── Phase 1: RSS Fetch ──────────────────────────────────────────────────
+    this.currentPhase = 'scraping';
+    logger.info({ cycle: this.cycleNumber }, 'Phase 1: Fetching RSS feeds');
 
-      try {
-        const lyrics = await this.lyricsService.generateLyrics(article);
-        this.enqueueLyrics(lyrics);
-      } catch (err) {
-        logger.error({ err, articleId: article.id }, 'Failed to generate lyrics for article');
-      }
-    }
-  }
-
-  private enqueueLyrics(lyrics: GeneratedLyrics): void {
-    if (this.lyricsQueue.length >= LYRICS_QUEUE_MAX) {
-      logger.warn('Lyrics queue at max capacity — dropping oldest entry');
-      this.lyricsQueue.shift();
-    }
-    this.lyricsQueue.push(lyrics);
-    logger.info(
-      { title: lyrics.title, genre: lyrics.genre.name, queueSize: this.lyricsQueue.length },
-      'Lyrics enqueued',
-    );
-  }
-
-  private async fetchMoreLyrics(): Promise<void> {
+    let articles: NewsArticle[] = [];
     try {
-      const articles = await this.rssService.fetchOnce();
-      if (articles.length > 0) {
-        await this.handleNewArticles(articles);
-      }
+      articles = await this.rssService.fetchOnce();
     } catch (err) {
-      logger.error({ err }, 'Failed to fetch more articles for lyrics');
+      const msg = `RSS fetch failed: ${String(err)}`;
+      logger.error({ err }, msg);
+      errors.push(msg);
     }
+
+    logger.info({ articleCount: articles.length }, 'RSS fetch complete');
+
+    if (articles.length === 0) {
+      this.currentPhase = 'idle';
+      return { articlesScraped: 0, storiesSynthesized: 0, lyricsGenerated: 0, songsProduced: 0, errors };
+    }
+
+    // ── Phase 2: AI News Synthesis (1 Claude call) ──────────────────────────
+    this.currentPhase = 'synthesizing';
+    logger.info({ cycle: this.cycleNumber }, 'Phase 2: Synthesizing news into stories');
+
+    let stories: SynthesizedStory[] = [];
+    try {
+      stories = await this.lyricsService.synthesizeNews(articles, SONGS_PER_CYCLE);
+    } catch (err) {
+      const msg = `News synthesis failed: ${String(err)}`;
+      logger.error({ err }, msg);
+      errors.push(msg);
+      this.currentPhase = 'idle';
+      return { articlesScraped: articles.length, storiesSynthesized: 0, lyricsGenerated: 0, songsProduced: 0, errors };
+    }
+
+    logger.info(
+      { storyCount: stories.length, headlines: stories.map((s) => s.headline) },
+      'News synthesis complete',
+    );
+
+    // ── Phase 3: Batch Lyrics Generation (parallel Claude calls) ────────────
+    this.currentPhase = 'lyrics';
+    logger.info({ cycle: this.cycleNumber }, 'Phase 3: Generating lyrics');
+
+    let allLyrics: GeneratedLyrics[] = [];
+    try {
+      allLyrics = await this.lyricsService.batchGenerateLyrics(stories);
+    } catch (err) {
+      const msg = `Batch lyrics failed: ${String(err)}`;
+      logger.error({ err }, msg);
+      errors.push(msg);
+    }
+
+    logger.info(
+      { lyricsCount: allLyrics.length, titles: allLyrics.map((l) => `${l.title} (${l.genre.name})`) },
+      'Lyrics generation complete',
+    );
+
+    // ── Phase 4: Suno Song Generation (2 at a time) ─────────────────────────
+    this.currentPhase = 'generating_songs';
+    logger.info({ cycle: this.cycleNumber, songCount: allLyrics.length }, 'Phase 4: Generating songs via Suno');
+
+    let songsProduced = 0;
+
+    if (this.sunoGenerator) {
+      songsProduced = await this.generateSongBatch(allLyrics, errors);
+    } else {
+      const msg = 'Suno not initialized — skipping song generation. Run: npm run suno:login';
+      logger.warn(msg);
+      errors.push(msg);
+    }
+
+    // ── Done ────────────────────────────────────────────────────────────────
+    this.currentPhase = 'idle';
+
+    return {
+      articlesScraped: articles.length,
+      storiesSynthesized: stories.length,
+      lyricsGenerated: allLyrics.length,
+      songsProduced,
+      errors,
+    };
   }
 
   // ---------------------------------------------------------------------------
-  // Private: audio generation
+  // Song generation (batch, 2 concurrent)
   // ---------------------------------------------------------------------------
 
-  private async generateSongFromLyrics(lyrics: GeneratedLyrics): Promise<void> {
-    if (!this.sunoGenerator) {
-      logger.error('Suno generator not initialized — cannot generate song');
-      return;
+  private async generateSongBatch(
+    lyrics: GeneratedLyrics[],
+    errors: string[],
+  ): Promise<number> {
+    let produced = 0;
+
+    for (let i = 0; i < lyrics.length; i += SUNO_CONCURRENCY) {
+      if (!this.running) break;
+
+      const batch = lyrics.slice(i, i + SUNO_CONCURRENCY);
+      const batchNum = Math.floor(i / SUNO_CONCURRENCY) + 1;
+      const totalBatches = Math.ceil(lyrics.length / SUNO_CONCURRENCY);
+
+      logger.info(
+        { batch: batchNum, total: totalBatches, titles: batch.map((l) => l.title) },
+        'Generating song batch',
+      );
+
+      const results = await Promise.allSettled(
+        batch.map((l) => this.generateSingleSong(l)),
+      );
+
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          produced++;
+        } else {
+          const msg = `Song generation failed: ${String(result.reason)}`;
+          logger.error(msg);
+          errors.push(msg);
+        }
+      }
     }
+
+    return produced;
+  }
+
+  private async generateSingleSong(lyrics: GeneratedLyrics): Promise<void> {
+    if (!this.sunoGenerator) throw new Error('Suno not initialized');
 
     this.pendingGeneration++;
     const id = nanoid();
@@ -266,8 +348,6 @@ export class Pipeline {
     const outputPath = path.join(config.MEDIA_DIR, 'songs', `${id}.mp3`);
 
     try {
-      logger.info({ title: lyrics.title, genre: lyrics.genre.name }, 'Generating Suno song');
-
       const result = await this.sunoGenerator.generate({
         style: lyrics.genre.sunoStyle,
         lyrics: lyrics.lyrics,
@@ -284,8 +364,8 @@ export class Pipeline {
         metadata: {
           genre: lyrics.genre.name,
           clipId: result.clipId,
-          articleId: lyrics.article.id,
-          articleSource: lyrics.article.source,
+          storyHeadline: lyrics.storyHeadline,
+          storyAngle: lyrics.storyAngle,
           sunoStyle: lyrics.genre.sunoStyle,
         },
         createdAt: new Date(),
@@ -295,48 +375,17 @@ export class Pipeline {
       this.totalSongsGenerated++;
 
       logger.info(
-        { title: lyrics.title, outputPath, bufferSize: this.audioBuffer.length },
-        'Song added to audio buffer',
+        { title: lyrics.title, genre: lyrics.genre.name, bufferSize: this.audioBuffer.length },
+        'Song added to buffer',
       );
-    } catch (err) {
-      logger.error({ err, title: lyrics.title }, 'Song generation failed');
-      // Re-queue the lyrics if generation failed due to transient error
-      if (this.lyricsQueue.length < LYRICS_QUEUE_MAX) {
-        this.lyricsQueue.unshift(lyrics);
-      }
     } finally {
       this.pendingGeneration--;
     }
   }
 
-  private async generateFillerSong(): Promise<void> {
-    if (!this.sunoGenerator) return;
-
-    this.pendingGeneration++;
-
-    // Pick a random filler topic
-    const topic = FILLER_TOPICS[Math.floor(Math.random() * FILLER_TOPICS.length)];
-
-    const fillerArticle: NewsArticle = {
-      id: nanoid(),
-      source: 'RadioWar Filler',
-      title: topic,
-      description: `RadioWar filler content: ${topic}. Imagine the sounds of distant conflict, the weight of history, the resilience of those who live through war.`,
-      link: 'https://radiowar.internal/filler',
-      publishedAt: new Date(),
-      fetchedAt: new Date(),
-    };
-
-    try {
-      logger.info({ topic }, 'Generating filler song');
-      const lyrics = await this.lyricsService.generateLyrics(fillerArticle);
-      await this.generateSongFromLyrics(lyrics);
-    } catch (err) {
-      logger.error({ err, topic }, 'Filler song generation failed');
-    } finally {
-      this.pendingGeneration--;
-    }
-  }
+  // ---------------------------------------------------------------------------
+  // News block (TTS)
+  // ---------------------------------------------------------------------------
 
   private async generateNewsBlock(): Promise<void> {
     const id = nanoid();
@@ -344,7 +393,6 @@ export class Pipeline {
     const outputPath = path.join(config.MEDIA_DIR, 'news', `${id}.mp3`);
 
     try {
-      // Fetch latest articles for the news block
       const articles = await this.rssService.fetchOnce();
       if (articles.length === 0) {
         logger.debug('No new articles for news block — skipping');
@@ -356,7 +404,8 @@ export class Pipeline {
         .map((a, i) => `${i + 1}. ${a.title}. From ${a.source}.`)
         .join(' ');
 
-      const newsText = `RadioWar News Update. ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}. ` +
+      const newsText =
+        `RadioWar News Update. ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}. ` +
         `Here are today's headlines. ${headlines} That's the latest from RadioWar.`;
 
       await this.ttsService.generateSpeech(newsText, outputPath);
@@ -368,19 +417,19 @@ export class Pipeline {
         filePath: outputPath,
         metadata: {
           articleCount: articles.length,
-          headlines: articles.slice(0, 5).map(a => a.title),
+          headlines: articles.slice(0, 5).map((a) => a.title),
         },
         createdAt: new Date(),
       };
 
-      // Insert news block at appropriate position in buffer
+      // Insert after first 3 songs so it breaks up the music
       const insertPosition = Math.min(3, this.audioBuffer.length);
       this.audioBuffer.splice(insertPosition, 0, entry);
       this.totalNewsBlocksGenerated++;
 
       logger.info(
-        { articleCount: articles.length, outputPath, bufferSize: this.audioBuffer.length },
-        'News block added to audio buffer',
+        { articleCount: articles.length, bufferSize: this.audioBuffer.length },
+        'News block added to buffer',
       );
     } catch (err) {
       logger.error({ err }, 'News block generation failed');
@@ -388,7 +437,7 @@ export class Pipeline {
   }
 
   // ---------------------------------------------------------------------------
-  // Private: Suno initialization
+  // Suno initialization
   // ---------------------------------------------------------------------------
 
   private async initSuno(): Promise<void> {
@@ -401,8 +450,7 @@ export class Pipeline {
       const isAuthed = await this.sunoSession.verifySession();
       if (!isAuthed) {
         logger.warn(
-          'Suno session verification failed — songs will not be generated until a valid session is provided. ' +
-          'Run: npm run suno:login',
+          'Suno session not authenticated — songs will not be generated. Run: npm run suno:login',
         );
       } else {
         logger.info('Suno session verified');
@@ -410,14 +458,17 @@ export class Pipeline {
 
       this.sunoGenerator = new SunoGenerator(this.sunoSession);
     } catch (err) {
-      logger.error({ err }, 'Failed to initialize Suno session — song generation disabled');
+      logger.error({ err }, 'Suno initialization failed — song generation disabled');
       this.sunoSession = null;
       this.sunoGenerator = null;
     }
   }
 }
 
-// Singleton instance
+// ---------------------------------------------------------------------------
+// Singleton
+// ---------------------------------------------------------------------------
+
 let _pipeline: Pipeline | null = null;
 
 export function getPipeline(): Pipeline {
