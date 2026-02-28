@@ -1,7 +1,6 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { getConfig } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { withRetry } from '../utils/retry.js';
+import { callClaudeCli } from '../utils/claude-cli.js';
 import {
   buildLyricsPromptFromStory,
   buildSynthesisPrompt,
@@ -25,24 +24,16 @@ export interface GeneratedLyrics {
   generatedAt: Date;
 }
 
-const SYNTHESIS_MODEL = 'claude-sonnet-4-5';
-const LYRICS_MODEL = 'claude-sonnet-4-5';
-const SYNTHESIS_MAX_TOKENS = 4000;
-const LYRICS_MAX_TOKENS = 1500;
-
 export class LyricsService {
-  private readonly client: Anthropic;
   private readonly rotator: GenreRotator;
 
   constructor() {
-    const config = getConfig();
-    this.client = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
     this.rotator = new GenreRotator();
   }
 
   /**
    * Synthesize a batch of raw articles into unique story angles.
-   * Claude clusters duplicates, merges facts, applies editorial stance.
+   * Uses `claude` CLI (Max subscription auth).
    */
   async synthesizeNews(
     articles: NewsArticle[],
@@ -58,7 +49,6 @@ export class LyricsService {
       'Synthesizing news articles into stories',
     );
 
-    // Build article summaries for Claude
     const summaries = articles
       .map((a) =>
         `[ID: ${a.id}] [Source: ${a.source}] ${a.title}\n${a.description}`,
@@ -68,7 +58,13 @@ export class LyricsService {
     const { systemPrompt, userPrompt } = buildSynthesisPrompt(summaries, targetCount);
 
     const stories = await withRetry(
-      () => this.callClaudeSynthesis(systemPrompt, userPrompt),
+      async () => {
+        const response = await callClaudeCli(userPrompt, {
+          systemPrompt,
+          timeout: 180_000,
+        });
+        return parseSynthesisResponse(response);
+      },
       { maxAttempts: 3, baseDelay: 3000, maxDelay: 15000, label: 'news-synthesis' },
     );
 
@@ -82,7 +78,7 @@ export class LyricsService {
 
   /**
    * Generate lyrics for a batch of synthesized stories.
-   * Runs up to 3 in parallel for speed, rotates genres.
+   * Runs sequentially (each call spawns a claude process).
    */
   async batchGenerateLyrics(stories: SynthesizedStory[]): Promise<GeneratedLyrics[]> {
     logger.info({ storyCount: stories.length }, 'Batch generating lyrics');
@@ -90,19 +86,16 @@ export class LyricsService {
     this.rotator.reset();
     const results: GeneratedLyrics[] = [];
 
-    // Process 3 at a time to stay within Claude rate limits
-    for (let i = 0; i < stories.length; i += 3) {
-      const batch = stories.slice(i, i + 3);
-      const batchResults = await Promise.allSettled(
-        batch.map((story) => this.generateLyricsFromStory(story)),
-      );
-
-      for (const result of batchResults) {
-        if (result.status === 'fulfilled') {
-          results.push(result.value);
-        } else {
-          logger.error({ err: result.reason }, 'Failed to generate lyrics for story');
-        }
+    for (const [i, story] of stories.entries()) {
+      try {
+        logger.info(
+          { index: i + 1, total: stories.length, headline: story.headline },
+          'Generating lyrics',
+        );
+        const lyrics = await this.generateLyricsFromStory(story);
+        results.push(lyrics);
+      } catch (err) {
+        logger.error({ err, headline: story.headline }, 'Failed to generate lyrics');
       }
     }
 
@@ -131,7 +124,13 @@ export class LyricsService {
     const { systemPrompt, userPrompt } = buildLyricsPromptFromStory(story, selectedGenre);
 
     const output = await withRetry(
-      () => this.callClaudeLyrics(systemPrompt, userPrompt),
+      async () => {
+        const response = await callClaudeCli(userPrompt, {
+          systemPrompt,
+          timeout: 120_000,
+        });
+        return parseLyricsResponse(response);
+      },
       { maxAttempts: 3, baseDelay: 2000, maxDelay: 15000, label: 'lyrics-generation' },
     );
 
@@ -148,47 +147,5 @@ export class LyricsService {
       storyAngle: story.angle,
       generatedAt: new Date(),
     };
-  }
-
-  // ---------------------------------------------------------------------------
-  // Private: Claude API calls
-  // ---------------------------------------------------------------------------
-
-  private async callClaudeSynthesis(
-    systemPrompt: string,
-    userPrompt: string,
-  ): Promise<SynthesizedStory[]> {
-    const message = await this.client.messages.create({
-      model: SYNTHESIS_MODEL,
-      max_tokens: SYNTHESIS_MAX_TOKENS,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
-    });
-
-    const textBlock = message.content.find((block) => block.type === 'text');
-    if (!textBlock || textBlock.type !== 'text') {
-      throw new Error('Claude returned no text content for synthesis');
-    }
-
-    return parseSynthesisResponse(textBlock.text);
-  }
-
-  private async callClaudeLyrics(
-    systemPrompt: string,
-    userPrompt: string,
-  ): Promise<LyricsOutput> {
-    const message = await this.client.messages.create({
-      model: LYRICS_MODEL,
-      max_tokens: LYRICS_MAX_TOKENS,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
-    });
-
-    const textBlock = message.content.find((block) => block.type === 'text');
-    if (!textBlock || textBlock.type !== 'text') {
-      throw new Error('Claude returned no text content for lyrics');
-    }
-
-    return parseLyricsResponse(textBlock.text);
   }
 }

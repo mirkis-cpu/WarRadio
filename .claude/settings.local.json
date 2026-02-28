@@ -19,7 +19,11 @@
       "Bash(python3:*)",
       "Bash(npm install:*)",
       "Bash(npx create-next-app@latest:*)",
-      "Bash(mv:*)"
+      "Bash(mv:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx next:*)",
+      "Bash(npx tsx:*)",
+      "Bash(claude:*)"
     ]
   }
 }

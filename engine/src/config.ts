@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { z } from 'zod';
 
 const envSchema = z.object({
-  ANTHROPIC_API_KEY: z.string().min(1, 'ANTHROPIC_API_KEY is required'),
+  ANTHROPIC_API_KEY: z.string().optional(),
   ENGINE_PORT: z.coerce.number().default(3001),
   DATABASE_PATH: z.string().default('./data/radiowar.db'),
   MEDIA_DIR: z.string().default('./media'),

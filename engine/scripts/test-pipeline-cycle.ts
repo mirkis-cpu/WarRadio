@@ -3,7 +3,10 @@
  * Test a full production cycle WITHOUT Suno:
  *   RSS Fetch → Claude Synthesis → Claude Lyrics
  *
- * Usage: ANTHROPIC_API_KEY=sk-ant-... npx tsx scripts/test-pipeline-cycle.ts
+ * Uses ANTHROPIC_API_KEY or CLAUDE_CODE_SESSION_ACCESS_TOKEN (Max subscription).
+ * Run from within Claude Code to automatically use your subscription.
+ *
+ * Usage: npx tsx scripts/test-pipeline-cycle.ts
  */
 import { RssService } from '../src/services/rss-service.js';
 import { LyricsService } from '../src/services/lyrics-service.js';
@@ -13,11 +16,15 @@ const SONG_COUNT = 10;
 async function main() {
   console.log('=== RadioWar Pipeline Cycle Test ===\n');
 
-  if (!process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY.startsWith('sk-ant-test')) {
-    console.error('ERROR: Set a real ANTHROPIC_API_KEY to test the pipeline.');
-    console.error('Usage: ANTHROPIC_API_KEY=sk-ant-... npx tsx scripts/test-pipeline-cycle.ts');
+  // Check auth
+  const hasKey = process.env.ANTHROPIC_API_KEY;
+  const hasSession = process.env.CLAUDE_CODE_SESSION_ACCESS_TOKEN;
+  if (!hasKey && !hasSession) {
+    console.error('ERROR: No API credentials found.');
+    console.error('Either set ANTHROPIC_API_KEY or run from within Claude Code (Max sub).');
     process.exit(1);
   }
+  console.log(`Auth: ${hasKey ? 'ANTHROPIC_API_KEY' : 'Claude Code session token (Max)'}\n`);
 
   const rss = new RssService();
   const lyrics = new LyricsService();
@@ -33,6 +40,12 @@ async function main() {
     process.exit(1);
   }
 
+  console.log('  Top 5 articles:');
+  for (const a of articles.slice(0, 5)) {
+    console.log(`    [${a.source}] ${a.title}`);
+  }
+  console.log();
+
   // ── Phase 2: Claude Synthesis ─────────────────────────────────────────────
   console.log(`Phase 2: Synthesizing ${articles.length} articles into ${SONG_COUNT} stories...`);
   const t2 = Date.now();
@@ -44,11 +57,11 @@ async function main() {
     console.log(`  ${i + 1}. [imp:${story.importance}] ${story.headline}`);
     console.log(`     Angle: ${story.angle}`);
     console.log(`     ${story.summary.slice(0, 150)}${story.summary.length > 150 ? '...' : ''}`);
-    console.log(`     Sources: ${story.sourceArticleIds.length} article(s)\n`);
+    console.log();
   }
 
   // ── Phase 3: Batch Lyrics ────────────────────────────────────────────────
-  console.log(`Phase 3: Generating ${stories.length} song lyrics...`);
+  console.log(`Phase 3: Generating ${stories.length} song lyrics (3 parallel)...`);
   const t3 = Date.now();
   const allLyrics = await lyrics.batchGenerateLyrics(stories);
   console.log(`  → ${allLyrics.length} lyrics in ${((Date.now() - t3) / 1000).toFixed(1)}s\n`);
@@ -60,8 +73,8 @@ async function main() {
 
     console.log(`  ${i + 1}. "${l.title}" [${l.genre.name}]`);
     console.log(`     Story: ${l.storyHeadline}`);
+    console.log(`     Suno style: ${l.genre.sunoStyle}`);
 
-    // Print first 3 lines of lyrics
     const lines = l.lyrics.split('\n').filter((line) => line.trim()).slice(0, 4);
     for (const line of lines) {
       console.log(`     ${line}`);
@@ -77,7 +90,7 @@ async function main() {
   console.log(`  Stories synthesized: ${stories.length}`);
   console.log(`  Lyrics generated: ${allLyrics.length}`);
   console.log(`  Genre distribution: ${[...genreCounts.entries()].map(([g, c]) => `${g}:${c}`).join(', ')}`);
-  console.log(`\n  Ready for Suno generation (${allLyrics.length} songs × ~3min = ~${allLyrics.length * 3}min content)`);
+  console.log(`\n  Ready for Suno: ${allLyrics.length} songs × ~3min = ~${allLyrics.length * 3}min content`);
   console.log('\n=== Done ===');
 }
 
