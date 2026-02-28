@@ -103,13 +103,11 @@ async function handleTwoCaptcha(page: Page): Promise<void> {
 
 async function extractSiteKey(page: Page): Promise<string | null> {
   try {
-    return await page.evaluate(() => {
-      const iframe = document.querySelector('iframe[src*="hcaptcha.com"]') as HTMLIFrameElement | null;
-      if (!iframe) return null;
-      const src = iframe.src;
-      const match = src.match(/[?&]sitekey=([^&]+)/);
-      return match ? match[1] : null;
-    });
+    const iframe = page.locator(HCAPTCHA_IFRAME_SELECTOR).first();
+    const src = await iframe.getAttribute('src');
+    if (!src) return null;
+    const match = src.match(/[?&]sitekey=([^&]+)/);
+    return match ? match[1] : null;
   } catch {
     return null;
   }
@@ -168,23 +166,20 @@ async function pollFor2CaptchaResult(apiKey: string, taskId: string): Promise<st
 }
 
 async function injectCaptchaToken(page: Page, token: string): Promise<void> {
-  await page.evaluate((t: string) => {
-    // Set the hcaptcha response hidden input
-    const textarea = document.querySelector('textarea[name="h-captcha-response"]') as HTMLTextAreaElement | null;
-    if (textarea) {
-      textarea.value = t;
-    }
+  // Fill the hcaptcha response textarea directly via Playwright
+  const textarea = page.locator('textarea[name="h-captcha-response"]').first();
+  const isVisible = await textarea.isVisible({ timeout: 2_000 }).catch(() => false);
+  if (isVisible) {
+    await textarea.fill(token);
+  }
 
-    // Also try to trigger callback if hcaptcha is globally available
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const win = window as any;
-    if (win.hcaptcha && typeof win.hcaptcha.execute === 'function') {
-      // Trigger form submit after token injection
+  // Also evaluate in page context to dispatch change event
+  await page.evaluate((t) => {
+    const el = (globalThis as any).document?.querySelector?.('textarea[name="h-captcha-response"]');
+    if (el) {
+      el.value = t;
+      el.dispatchEvent(new (globalThis as any).Event('change', { bubbles: true }));
     }
-
-    // Dispatch change event so the form registers the value
-    const event = new Event('change', { bubbles: true });
-    if (textarea) textarea.dispatchEvent(event);
   }, token);
 
   // Give the page time to process the token

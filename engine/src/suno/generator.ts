@@ -294,9 +294,11 @@ export class SunoGenerator {
 
       // Check if the clip URL pattern is known (Suno CDN pattern)
       const cdnUrl = await page.evaluate((id: string) => {
-        const audioElements = Array.from(document.querySelectorAll('audio'));
+        const doc = (globalThis as any).document;
+        if (!doc) return null;
+        const audioElements = Array.from(doc.querySelectorAll('audio')) as any[];
         for (const audio of audioElements) {
-          if (audio.src && audio.src.includes(id)) return audio.src;
+          if (audio.src && (audio.src as string).includes(id)) return audio.src as string;
         }
         return null;
       }, clipId);

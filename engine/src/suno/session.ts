@@ -40,7 +40,7 @@ export class SunoSession {
 
     this.context = await this.browser.newContext({
       userAgent: CUSTOM_USER_AGENT,
-      storageState: storageState ?? undefined,
+      storageState: (storageState as any) ?? undefined,
       viewport: { width: 1280, height: 800 },
       locale: 'en-US',
       timezoneId: 'America/New_York',
@@ -53,7 +53,7 @@ export class SunoSession {
     await this.context.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).chrome = { runtime: {} };
+      (globalThis as any).chrome = { runtime: {} };
     });
 
     this.scheduleTokenRefresh();
