@@ -1,26 +1,93 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
+/* -------------------------------------------------------------------------
+   RadioWar Design Tokens
+   ------------------------------------------------------------------------- */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-background: #0a0a0a;
+  --color-foreground: #f4f4f5;
+
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  /* Content type accent colours */
+  --color-song: oklch(63.7% 0.265 293.5);    /* violet-500 */
+  --color-news: oklch(75.5% 0.183 83.5);     /* amber-500  */
+  --color-podcast: oklch(62.3% 0.214 258.5); /* blue-500   */
+  --color-ad: oklch(69.5% 0.196 149.5);      /* green-500  */
+
+  /* Sidebar width */
+  --sidebar-width: 220px;
+  /* Now-playing bar height */
+  --nowplaying-height: 72px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* -------------------------------------------------------------------------
+   Base reset
+   ------------------------------------------------------------------------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: dark;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: #0a0a0a;
+  color: #f4f4f5;
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* -------------------------------------------------------------------------
+   Scrollbar styling
+   ------------------------------------------------------------------------- */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #18181b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
+}
+
+/* -------------------------------------------------------------------------
+   Content type badge helpers (used in multiple components)
+   ------------------------------------------------------------------------- */
+.badge-song    { background: rgb(139 92 246 / 0.15); color: #a78bfa; border-color: rgb(139 92 246 / 0.3); }
+.badge-news    { background: rgb(245 158 11 / 0.15); color: #fbbf24; border-color: rgb(245 158 11 / 0.3); }
+.badge-podcast { background: rgb(59 130 246 / 0.15); color: #60a5fa; border-color: rgb(59 130 246 / 0.3); }
+.badge-ad      { background: rgb(34 197 94  / 0.15); color: #4ade80; border-color: rgb(34 197 94  / 0.3); }
+
+/* -------------------------------------------------------------------------
+   Progress bar animation
+   ------------------------------------------------------------------------- */
+@keyframes progress-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.7; }
+}
+
+.progress-active {
+  animation: progress-pulse 2s ease-in-out infinite;
+}
+
+/* -------------------------------------------------------------------------
+   Drag-and-drop ghost styles
+   ------------------------------------------------------------------------- */
+.dnd-ghost {
+  opacity: 0.5;
+  border: 1px dashed #52525b;
 }
