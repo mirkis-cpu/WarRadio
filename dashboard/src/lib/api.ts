@@ -142,7 +142,7 @@ export interface BufferStatus {
 // HTTP client
 // ---------------------------------------------------------------------------
 
-const BASE_URL = "http://localhost:3001";
+const BASE_URL = process.env.NEXT_PUBLIC_ENGINE_URL || "http://localhost:3001";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 

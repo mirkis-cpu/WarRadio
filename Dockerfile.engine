@@ -1,0 +1,57 @@
+# ── Stage 1: Build TypeScript ─────────────────────────────────────────────────
+FROM node:22-bookworm AS builder
+
+WORKDIR /app
+
+COPY engine/package.json engine/package-lock.json ./
+RUN npm ci
+
+COPY engine/tsconfig.json ./
+COPY engine/src/ ./src/
+
+RUN npm run build
+
+# ── Stage 2: Production Runtime ──────────────────────────────────────────────
+FROM node:22-bookworm-slim
+
+WORKDIR /app
+
+# System dependencies: ffmpeg (with drawtext), Python (for edge-tts), fonts, build tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    python3 \
+    python3-pip \
+    fonts-dejavu-core \
+    fontconfig \
+    build-essential \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Production Node.js dependencies (includes native better-sqlite3 build)
+COPY engine/package.json engine/package-lock.json ./
+RUN npm ci --omit=dev
+
+# Install Playwright Chromium + system deps for headless browser (Suno automation)
+RUN npx playwright install chromium --with-deps
+
+# Install edge-tts CLI (Python)
+RUN pip install --break-system-packages edge-tts
+
+# Install Claude Code CLI (for claude -p text generation)
+RUN npm install -g @anthropic-ai/claude-code
+
+# Copy compiled TypeScript
+COPY --from=builder /app/dist ./dist
+
+# Copy scripts (for manual testing inside container)
+COPY engine/scripts/ ./scripts/
+COPY engine/tsconfig.json ./
+
+# Create data directories
+RUN mkdir -p /app/data/sessions /app/media/songs /app/media/podcasts /app/media/news /app/media/ads
+
+ENV NODE_ENV=production
+EXPOSE 3001
+
+CMD ["node", "dist/server.js"]

@@ -4,6 +4,7 @@ import path from 'path';
 import { EventEmitter } from 'events';
 import { logger } from '../utils/logger.js';
 import { sleep } from '../utils/sleep.js';
+import { getConfig } from '../config.js';
 import type { AudioBufferEntry } from './pipeline.js';
 
 const YOUTUBE_RTMP_BASE = 'rtmp://a.rtmp.youtube.com/live2';
@@ -148,6 +149,7 @@ export class StreamManager extends EventEmitter {
   private streamSingleTrack(track: AudioBufferEntry): Promise<void> {
     return new Promise((resolve, reject) => {
       const rtmpTarget = `${this.config.rtmpUrl}/${this.config.streamKey}`;
+      const fontPath = getConfig().FONT_PATH;
 
       // Build the overlay text
       const genre = (track.metadata?.genre as string) || track.type;
@@ -180,7 +182,7 @@ export class StreamManager extends EventEmitter {
 
       // LIVE badge (top-right)
       filterParts.push(
-        `[bg]drawtext=text='LIVE':fontcolor=red:fontsize=36:x=${VIDEO_WIDTH - 150}:y=30:fontfile=/System/Library/Fonts/Helvetica.ttc[v1]`,
+        `[bg]drawtext=text='LIVE':fontcolor=red:fontsize=36:x=${VIDEO_WIDTH - 150}:y=30:fontfile=${fontPath}[v1]`,
       );
 
       // Station name (top-left)

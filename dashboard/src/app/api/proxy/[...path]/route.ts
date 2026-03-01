@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-const ENGINE_BASE = "http://localhost:3001";
+const ENGINE_BASE = process.env.ENGINE_URL || "http://localhost:3001";
 
 async function proxyRequest(
   req: NextRequest,

@@ -22,8 +22,12 @@ const fastify = Fastify({
   logger: false, // We use pino directly
 });
 
+const corsOrigins = config.CORS_ORIGINS
+  ? config.CORS_ORIGINS.split(',').map(s => s.trim())
+  : [`http://localhost:${config.ENGINE_PORT - 1}`, 'http://localhost:3000'];
+
 await fastify.register(cors, {
-  origin: [`http://localhost:${config.ENGINE_PORT - 1}`, 'http://localhost:3000'],
+  origin: corsOrigins,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
 });
 
