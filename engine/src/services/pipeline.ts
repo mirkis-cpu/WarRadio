@@ -6,6 +6,7 @@ import { sleep } from '../utils/sleep.js';
 import { RssService, type NewsArticle } from './rss-service.js';
 import { LyricsService, type GeneratedLyrics, type SynthesizedStory } from './lyrics-service.js';
 import { TtsService } from './tts-service.js';
+import { PodcastService } from './podcast-service.js';
 import { SunoSession } from '../suno/session.js';
 import { SunoGenerator } from '../suno/generator.js';
 import { downloadAudio } from '../suno/downloader.js';
@@ -33,7 +34,7 @@ const NEWS_BLOCK_INTERVAL_MS = 15 * 60 * 1000;
 
 export interface AudioBufferEntry {
   id: string;
-  type: 'song' | 'news_block';
+  type: 'song' | 'news_block' | 'podcast';
   title: string;
   filePath: string;
   durationSeconds?: number;
@@ -50,6 +51,7 @@ export interface PipelineStatus {
   pendingGeneration: number;
   totalSongsGenerated: number;
   totalNewsBlocksGenerated: number;
+  totalPodcastsGenerated: number;
   currentPhase: string;
   stream: StreamStatus | null;
 }
@@ -59,6 +61,7 @@ export interface CycleResult {
   storiesSynthesized: number;
   lyricsGenerated: number;
   songsProduced: number;
+  podcastsProduced: number;
   errors: string[];
 }
 
@@ -70,6 +73,7 @@ export class Pipeline {
   private readonly rssService: RssService;
   private readonly lyricsService: LyricsService;
   private readonly ttsService: TtsService;
+  private readonly podcastService: PodcastService;
   private sunoSession: SunoSession | null = null;
   private sunoGenerator: SunoGenerator | null = null;
   private streamManager: StreamManager | null = null;
@@ -88,6 +92,7 @@ export class Pipeline {
   private nextCycleAt: Date | null = null;
   private totalSongsGenerated = 0;
   private totalNewsBlocksGenerated = 0;
+  private totalPodcastsGenerated = 0;
   private currentPhase = 'idle';
   private cycleTimer: NodeJS.Timeout | null = null;
   private newsBlockTimer: NodeJS.Timeout | null = null;
@@ -96,6 +101,7 @@ export class Pipeline {
     this.rssService = new RssService();
     this.lyricsService = new LyricsService();
     this.ttsService = new TtsService();
+    this.podcastService = new PodcastService(this.ttsService);
   }
 
   // ---------------------------------------------------------------------------
@@ -168,6 +174,7 @@ export class Pipeline {
       pendingGeneration: this.pendingGeneration,
       totalSongsGenerated: this.totalSongsGenerated,
       totalNewsBlocksGenerated: this.totalNewsBlocksGenerated,
+      totalPodcastsGenerated: this.totalPodcastsGenerated,
       currentPhase: this.currentPhase,
       stream: this.streamManager?.getStatus() ?? null,
     };
@@ -181,8 +188,8 @@ export class Pipeline {
     // 1. Fresh tracks have priority
     if (this.audioBuffer.length > 0) {
       const track = this.audioBuffer.shift()!;
-      // Archive songs for replay (not news blocks — those are time-sensitive)
-      if (track.type === 'song') {
+      // Archive songs and podcasts for replay (not news blocks — those are time-sensitive)
+      if (track.type === 'song' || track.type === 'podcast') {
         this.playedArchive.push(track);
       }
       return track;
@@ -224,6 +231,7 @@ export class Pipeline {
             stories: result.storiesSynthesized,
             lyrics: result.lyricsGenerated,
             songs: result.songsProduced,
+            podcasts: result.podcastsProduced,
             errors: result.errors.length,
           },
           'Production cycle complete',
@@ -271,7 +279,7 @@ export class Pipeline {
 
     if (articles.length === 0) {
       this.currentPhase = 'idle';
-      return { articlesScraped: 0, storiesSynthesized: 0, lyricsGenerated: 0, songsProduced: 0, errors };
+      return { articlesScraped: 0, storiesSynthesized: 0, lyricsGenerated: 0, songsProduced: 0, podcastsProduced: 0, errors };
     }
 
     // ── Phase 2: AI News Synthesis (1 Claude call) ──────────────────────────
@@ -286,13 +294,52 @@ export class Pipeline {
       logger.error({ err }, msg);
       errors.push(msg);
       this.currentPhase = 'idle';
-      return { articlesScraped: articles.length, storiesSynthesized: 0, lyricsGenerated: 0, songsProduced: 0, errors };
+      return { articlesScraped: articles.length, storiesSynthesized: 0, lyricsGenerated: 0, songsProduced: 0, podcastsProduced: 0, errors };
     }
 
     logger.info(
       { storyCount: stories.length, headlines: stories.map((s) => s.headline) },
       'News synthesis complete',
     );
+
+    // ── Phase 2.5: Podcast Generation (optional) ────────────────────────────
+    let podcastsProduced = 0;
+
+    if (getConfig().PODCAST_ENABLED && stories.length > 0) {
+      this.currentPhase = 'podcast';
+      logger.info({ cycle: this.cycleNumber }, 'Phase 2.5: Generating podcast episode');
+
+      try {
+        const episode = await this.podcastService.generateEpisode(stories);
+
+        const entry: AudioBufferEntry = {
+          id: episode.id,
+          type: 'podcast',
+          title: episode.title,
+          filePath: episode.audioPath,
+          metadata: {
+            storyCount: episode.storyCount,
+            scriptLength: episode.scriptText.length,
+            durationEstimate: episode.durationEstimateMinutes,
+          },
+          createdAt: episode.generatedAt,
+        };
+
+        // Insert podcast at the beginning of the buffer so it plays first
+        this.audioBuffer.unshift(entry);
+        this.totalPodcastsGenerated++;
+        podcastsProduced = 1;
+
+        logger.info(
+          { title: episode.title, durationEstimate: episode.durationEstimateMinutes },
+          'Podcast episode added to buffer',
+        );
+      } catch (err) {
+        const msg = `Podcast generation failed: ${String(err)}`;
+        logger.error({ err }, msg);
+        errors.push(msg);
+      }
+    }
 
     // ── Phase 3: Batch Lyrics Generation (parallel Claude calls) ────────────
     this.currentPhase = 'lyrics';
@@ -334,6 +381,7 @@ export class Pipeline {
       storiesSynthesized: stories.length,
       lyricsGenerated: allLyrics.length,
       songsProduced,
+      podcastsProduced,
       errors,
     };
   }

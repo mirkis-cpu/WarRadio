@@ -13,6 +13,7 @@ import { registerRotationRoutes } from './routes/rotation.js';
 import { registerQueueRoutes } from './routes/queue.js';
 import { registerSettingsRoutes } from './routes/settings.js';
 import { registerPipelineRoutes } from './routes/pipeline.js';
+import { registerPodcastRoutes } from './routes/podcast.js';
 import { seedDefaultRotation } from './services/seed.js';
 
 const config = getConfig();
@@ -65,6 +66,7 @@ registerRotationRoutes(fastify, db);
 registerQueueRoutes(fastify, io);
 registerSettingsRoutes(fastify, db);
 registerPipelineRoutes(fastify, io);
+registerPodcastRoutes(fastify, io);
 
 // Socket.io connection handling
 io.on('connection', (socket) => {

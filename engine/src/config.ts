@@ -13,6 +13,10 @@ const envSchema = z.object({
   CAPTCHA_2_API_KEY: z.string().optional(),
   YOUTUBE_RTMP_URL: z.string().default('rtmp://a.rtmp.youtube.com/live2'),
   YOUTUBE_STREAM_KEY: z.string().optional(),
+  PODCAST_ENABLED: z.coerce.boolean().default(true),
+  PODCAST_VOICE: z.string().default('en-US-GuyNeural'),
+  PODCAST_INTERVAL_MS: z.coerce.number().default(4 * 60 * 60 * 1000),
+  PODCAST_TARGET_MINUTES: z.coerce.number().default(7),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;
