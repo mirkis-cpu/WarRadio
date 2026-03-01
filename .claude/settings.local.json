@@ -23,7 +23,12 @@
       "Bash(npx tsc:*)",
       "Bash(npx next:*)",
       "Bash(npx tsx:*)",
-      "Bash(claude:*)"
+      "Bash(claude:*)",
+      "Bash(ffmpeg:*)",
+      "Bash(brew:*)",
+      "mcp__playwright__browser_navigate",
+      "Bash(mkdir:*)",
+      "Bash(CLAUDECODE= claude:*)"
     ]
   }
 }

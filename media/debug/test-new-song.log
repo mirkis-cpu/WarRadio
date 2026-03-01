@@ -1,0 +1,21 @@
+npm warn exec The following package was not found and will be installed: tsx@4.21.0
+
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/Users/miroslavlalik/repos/RadioWar/scripts/test-suno-generate.ts' imported from /Users/miroslavlalik/repos/RadioWar/
+    at finalizeResolution (node:internal/modules/esm/resolve:274:11)
+    at moduleResolve (node:internal/modules/esm/resolve:864:10)
+    at defaultResolve (node:internal/modules/esm/resolve:990:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///Users/miroslavlalik/.npm/_npx/fd45a72a545557e9/node_modules/tsx/dist/esm/index.mjs?1772310491502:2:3744)
+    at resolveDirectory (file:///Users/miroslavlalik/.npm/_npx/fd45a72a545557e9/node_modules/tsx/dist/esm/index.mjs?1772310491502:2:4243)
+    at resolveTsPaths (file:///Users/miroslavlalik/.npm/_npx/fd45a72a545557e9/node_modules/tsx/dist/esm/index.mjs?1772310491502:2:4984)
+    at resolve (file:///Users/miroslavlalik/.npm/_npx/fd45a72a545557e9/node_modules/tsx/dist/esm/index.mjs?1772310491502:2:5361)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at Hooks.resolve (node:internal/modules/esm/hooks:240:30) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///Users/miroslavlalik/repos/RadioWar/scripts/test-suno-generate.ts'
+}
+
+Node.js v24.10.0

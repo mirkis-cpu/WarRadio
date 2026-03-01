@@ -11,8 +11,9 @@ import { mkdirSync, readdirSync } from 'fs';
 import { SunoSession } from '../src/suno/session.js';
 import { SunoGenerator } from '../src/suno/generator.js';
 import { downloadAudio } from '../src/suno/downloader.js';
+import { getConfig } from '../src/config.js';
 
-const SONGS_BASE = path.resolve('media/songs');
+const SONGS_BASE = path.resolve(getConfig().MEDIA_DIR, 'songs');
 
 function todayDir(): string {
   const d = new Date();

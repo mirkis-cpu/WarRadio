@@ -5,7 +5,7 @@ const envSchema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
   ENGINE_PORT: z.coerce.number().default(3001),
   DATABASE_PATH: z.string().default('./data/radiowar.db'),
-  MEDIA_DIR: z.string().default('./media'),
+  MEDIA_DIR: z.string().default(`${process.env.HOME}/Downloads/media`),
   SESSION_PATH: z.string().default('./data/sessions/storageState.json'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   SUNO_HEADLESS: z.coerce.boolean().default(true),

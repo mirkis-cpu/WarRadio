@@ -29,12 +29,18 @@ export function registerEngineRoutes(fastify: FastifyInstance, io: SocketIOServe
       return { status: engineStatus, message: 'Already running' };
     }
     setEngineStatus('starting', io);
-    // Pipeline start will be wired later
+    const pipeline = getPipeline();
+    pipeline.start().catch((err) => {
+      setEngineStatus('error', io);
+      console.error('Pipeline start failed:', err);
+    });
     setEngineStatus('running', io);
     return { status: engineStatus };
   });
 
   fastify.post('/api/v1/engine/stop', async () => {
+    const pipeline = getPipeline();
+    await pipeline.stop();
     setEngineStatus('stopped', io);
     return { status: engineStatus };
   });

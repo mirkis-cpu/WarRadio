@@ -2,14 +2,14 @@ import type { Page, Response } from 'playwright';
 import { logger } from '../utils/logger.js';
 import { sleep } from '../utils/sleep.js';
 import { withRetry } from '../utils/retry.js';
-import { handleCaptcha } from './captcha.js';
+import { handleCaptcha, detectVisualCaptcha, solveVisualCaptchaWithAI } from './captcha.js';
 import type { SunoSession } from './session.js';
 
 const SUNO_CREATE_URL = 'https://suno.com/create';
 const GENERATION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const POLL_INITIAL_DELAY_MS = 60_000; // Wait 60s before first poll (generation takes ~90s)
 const POLL_INTERVAL_MS = 10_000;     // Then poll every 10s
-const NETWORK_INTERCEPT_TIMEOUT_MS = 30_000;
+const NETWORK_INTERCEPT_TIMEOUT_MS = 180_000; // 3 min — allows time for manual captcha
 
 export interface SunoGenerationInput {
   style: string;   // Maps to sunoStyle from genre definition
@@ -74,8 +74,11 @@ export class SunoGenerator {
       await page.screenshot({ path: './media/debug/create-fail.png' }).catch(() => {});
     }
 
-    // Handle captcha if present
+    // Handle captcha if present (hCaptcha iframe)
     await handleCaptcha(page);
+
+    // Handle visual captcha (Arkose FunCaptcha) if present on page load
+    await this.waitForCaptchaIfPresent(page);
 
     // Enable Custom Mode + Lyrics sub-mode
     await this.enableCustomMode(page);
@@ -90,11 +93,11 @@ export class SunoGenerator {
     }
 
     // Fill in the form fields
-    logger.debug('Filling lyrics...');
+    logger.info('Filling lyrics...');
     await this.fillLyrics(page, input.lyrics);
-    logger.debug('Filling style...');
+    logger.info('Filling style...');
     await this.fillStyle(page, input.style);
-    logger.debug('Filling title...');
+    logger.info('Filling title...');
     await this.fillTitle(page, input.title);
 
     // Screenshot before clicking Create
@@ -103,16 +106,18 @@ export class SunoGenerator {
 
     // Click Create button
     await this.clickCreate(page);
-    logger.debug('Create clicked, waiting for clip ID from network...');
+    logger.info('Create clicked, waiting for clip ID from network...');
+
+    // Check for captcha overlay (visual challenge, not hCaptcha iframe)
+    await this.waitForCaptchaIfPresent(page);
 
     // Wait for clip ID from network intercept
     let clipId: string;
     try {
-      clipId = await Promise.race([
-        clipIdPromise,
-        sleep(NETWORK_INTERCEPT_TIMEOUT_MS).then(() => { throw new SunoGenerationError('Timed out waiting for clip ID from network'); }),
-      ]) as string;
+      clipId = await clipIdPromise;
     } catch (err) {
+      await page.screenshot({ path: './media/debug/clip-id-fail.png' }).catch(() => {});
+      logger.error({ error: String(err), url: page.url() }, 'Failed to capture clip ID — screenshot saved');
       throw new SunoGenerationError(`Failed to capture clip ID: ${String(err)}`);
     }
 
@@ -134,7 +139,7 @@ export class SunoGenerator {
       await sleep(1500);
       // Wait for the form to switch — at least one textarea should appear
       await page.waitForSelector('textarea', { state: 'visible', timeout: 8_000 }).catch(() => {});
-      logger.debug('Custom mode enabled');
+      logger.info('Custom mode enabled');
     } catch {
       logger.warn('Custom mode toggle not found — proceeding without enabling it');
     }
@@ -222,36 +227,70 @@ export class SunoGenerator {
   }
 
   private async fillTitle(page: Page, title: string): Promise<void> {
-    // Suno v5 Custom mode: title input may be outside viewport — scroll to it
-    const selectors = [
-      'input[placeholder*="Song Title"]',
-      'input[placeholder*="Title"]',
-      'input[placeholder*="title"]',
-    ];
+    // Suno v5: title input exists but may be outside viewport (not visible).
+    // Use JS to set the value directly since Playwright fill() requires visibility.
+    const selector = 'input[placeholder*="Song Title"]';
+    const count = await page.locator(selector).count();
 
-    for (const selector of selectors) {
-      const el = page.locator(selector).first();
-      const count = await el.count();
-      if (count > 0) {
-        // Scroll into view even if not currently visible
-        await el.scrollIntoViewIfNeeded().catch(() => {});
-        await sleep(300);
-        await el.click({ force: true });
-        await el.fill(title);
-        logger.info({ title, selector }, 'Title field filled');
-        return;
-      }
-    }
-
-    // Dump all inputs for debugging
-    const allInputs = await page.locator('input').all();
-    for (const inp of allInputs) {
-      const ph = await inp.getAttribute('placeholder').catch(() => '');
-      const type = await inp.getAttribute('type').catch(() => '');
-      if (ph) logger.info({ placeholder: ph, type }, 'Found input element');
+    if (count > 0) {
+      await page.evaluate(({ sel, val }) => {
+        const doc = (globalThis as any).document;
+        const el = doc.querySelector(sel);
+        if (el) {
+          const proto = Object.getPrototypeOf(el);
+          const nativeSetter = Object.getOwnPropertyDescriptor(proto.constructor.prototype, 'value')?.set
+            ?? Object.getOwnPropertyDescriptor(Object.getPrototypeOf(proto).constructor.prototype, 'value')?.set;
+          if (nativeSetter) nativeSetter.call(el, val);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }, { sel: selector, val: title });
+      logger.info({ title }, 'Title field filled via JS');
+      return;
     }
 
     logger.warn('Title input not found — song will use Suno auto-title');
+  }
+
+  /**
+   * Detect visual captcha overlay and attempt AI solve, then fall back to manual wait.
+   */
+  private async waitForCaptchaIfPresent(page: Page): Promise<void> {
+    await sleep(3000); // Give captcha time to appear
+
+    // Save debug screenshot
+    await page.screenshot({ path: './media/debug/captcha-check.png' }).catch(() => {});
+    logger.info('Captcha check screenshot saved: captcha-check.png');
+
+    const hasCaptcha = await detectVisualCaptcha(page);
+    if (!hasCaptcha) return;
+
+    logger.warn('Visual captcha detected — trying AI solver first...');
+
+    // Try AI solver (up to 3 attempts internally)
+    const solved = await solveVisualCaptchaWithAI(page);
+    if (solved) {
+      logger.info('Captcha solved by AI!');
+      return;
+    }
+
+    // Fallback: wait for manual solve
+    logger.warn('AI solver failed — waiting for manual captcha solve (up to 3 minutes)...');
+    const deadline = Date.now() + 170_000;
+    while (Date.now() < deadline) {
+      await sleep(3000);
+      const stillPresent = await detectVisualCaptcha(page);
+      if (!stillPresent) {
+        logger.info('Captcha solved (manual fallback)!');
+        await sleep(2000);
+        return;
+      }
+      const remaining = Math.round((deadline - Date.now()) / 1000);
+      if (remaining % 15 < 3) {
+        logger.info({ remainingSeconds: remaining }, 'Waiting for manual captcha solve...');
+      }
+    }
+    logger.error('Captcha not solved in time');
   }
 
   private async clickCreate(page: Page): Promise<void> {
