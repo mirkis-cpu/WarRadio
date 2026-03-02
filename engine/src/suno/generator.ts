@@ -108,8 +108,20 @@ export class SunoGenerator {
     await this.clickCreate(page);
     logger.info('Create clicked, waiting for clip ID from network...');
 
-    // Check for captcha overlay (visual challenge, not hCaptcha iframe)
-    await this.waitForCaptchaIfPresent(page);
+    // Periodically check for captcha DURING the clip ID wait.
+    // Captcha can appear 5-30s after Create click, so a one-time check isn't enough.
+    const captchaWatchTimer = setInterval(async () => {
+      try {
+        const hasCaptcha = await detectVisualCaptcha(page);
+        if (hasCaptcha) {
+          logger.warn('Captcha appeared during clip ID wait — solving...');
+          clearInterval(captchaWatchTimer);
+          await this.waitForCaptchaIfPresent(page);
+        }
+      } catch {
+        // Page may be navigating — ignore errors
+      }
+    }, 10_000);
 
     // Wait for clip ID from network intercept
     let clipId: string;
@@ -119,6 +131,8 @@ export class SunoGenerator {
       await page.screenshot({ path: './media/debug/clip-id-fail.png' }).catch(() => {});
       logger.error({ error: String(err), url: page.url() }, 'Failed to capture clip ID — screenshot saved');
       throw new SunoGenerationError(`Failed to capture clip ID: ${String(err)}`);
+    } finally {
+      clearInterval(captchaWatchTimer);
     }
 
     logger.info({ clipId }, 'Clip ID captured, polling for completion');

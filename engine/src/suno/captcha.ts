@@ -197,18 +197,18 @@ const CAPTCHA_SELECTORS = [
   // Arkose / FunCaptcha iframes
   'iframe[src*="arkoselabs"]',
   'iframe[src*="funcaptcha"]',
-  'iframe[src*="captcha"]',
   'iframe[src*="challenges.cloudflare.com"]',
   'iframe[src*="turnstile"]',
+  // FunCaptcha overlay containers (rendered on main page)
+  '#fc-iframe-wrap',
+  '[id*="fc-iframe"]',
+  '[class*="fc-iframe"]',
   // Generic captcha containers
   'div.cf-turnstile',
   '#FunCaptcha',
   '[id*="FunCaptcha"]',
   '[id*="arkose"]',
   '[class*="arkose"]',
-  '[class*="captcha"]',
-  '[id*="captcha"]',
-  '[data-callback*="captcha"]',
   'div[data-e2e*="captcha"]',
   // FunCaptcha text prompts (various phrasings)
   'text=/Pick all/i',
@@ -233,11 +233,11 @@ export async function detectVisualCaptcha(page: Page): Promise<boolean> {
     if (src) logger.debug({ src: src.slice(0, 120) }, 'iframe found on page');
   }
 
-  // Check selectors on main page
+  // Check selectors on main page (visible check)
   for (const selector of CAPTCHA_SELECTORS) {
-    const el = page.locator(selector).first();
     const count = await page.locator(selector).count();
     if (count > 0) {
+      const el = page.locator(selector).first();
       const visible = await el.isVisible({ timeout: 2_000 }).catch(() => false);
       logger.info({ selector, count, visible }, 'Captcha selector match');
       if (visible) return true;
@@ -245,8 +245,7 @@ export async function detectVisualCaptcha(page: Page): Promise<boolean> {
   }
 
   // Check nested frames for captcha content (Arkose uses deeply nested iframes)
-  // Strategy 1: Match frame URLs against known captcha patterns
-  // Strategy 2: Detect frames with image grids (4+ images = likely captcha)
+  let captchaFrameCount = 0;
   for (const frame of page.frames()) {
     if (frame === page.mainFrame()) continue;
     const url = frame.url();
@@ -255,9 +254,14 @@ export async function detectVisualCaptcha(page: Page): Promise<boolean> {
     if (url.includes('hcaptcha-assets') || url.includes('hcaptcha.html')) continue;
 
     // Check URL-based detection (known captcha iframe patterns)
-    if (url.includes('arkoselabs') || url.includes('funcaptcha') || url.includes('captcha') || url.includes('challenge')) {
+    if (url.includes('arkoselabs') || url.includes('funcaptcha')) {
       logger.info({ url: url.slice(0, 120) }, 'Captcha iframe detected via frame URL');
       return true;
+    }
+
+    // Track captcha-related frames (but don't immediately return — could be hidden enforcement)
+    if (url.includes('captcha') || url.includes('challenge')) {
+      captchaFrameCount++;
     }
 
     // Check content-based detection: frames with 4+ images are likely captcha grids
@@ -269,6 +273,34 @@ export async function detectVisualCaptcha(page: Page): Promise<boolean> {
       }
     } catch {
       // Frame may be detached or cross-origin — skip
+    }
+  }
+
+  // If captcha-related frames exist (even hidden), check for visible overlay via page evaluate.
+  // Arkose FunCaptcha renders a visible modal overlay on the main page even when its
+  // enforcement iframes are hidden. Check for large visible overlays with high z-index.
+  if (captchaFrameCount > 0) {
+    const hasOverlay = await page.evaluate(() => {
+      const doc = (globalThis as any).document;
+      if (!doc) return false;
+      // Check for FunCaptcha wrapper
+      const fcWrap = doc.querySelector('#fc-iframe-wrap');
+      if (fcWrap && fcWrap.offsetHeight > 100) return true;
+      // Check for any large overlay with high z-index (captcha dialogs use z-index > 10000)
+      const allDivs = doc.querySelectorAll('div');
+      for (const div of allDivs) {
+        const style = (globalThis as any).getComputedStyle(div);
+        const zIndex = parseInt(style.zIndex, 10);
+        if (zIndex > 10000 && div.offsetWidth > 200 && div.offsetHeight > 200) {
+          return true;
+        }
+      }
+      return false;
+    }).catch(() => false);
+
+    if (hasOverlay) {
+      logger.info({ captchaFrameCount }, 'Captcha overlay detected via high z-index element + captcha frames');
+      return true;
     }
   }
 
