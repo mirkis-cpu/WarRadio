@@ -1,8 +1,12 @@
 import path from 'path';
+import { existsSync, mkdirSync, readdirSync, statSync } from 'fs';
 import { nanoid } from 'nanoid';
+import { desc, eq, sql } from 'drizzle-orm';
 import { getConfig } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { sleep } from '../utils/sleep.js';
+import { getDb } from '../db/client.js';
+import { audioTracks } from '../db/schema.js';
 import { RssService, type NewsArticle } from './rss-service.js';
 import { LyricsService, type GeneratedLyrics, type SynthesizedStory } from './lyrics-service.js';
 import { TtsService } from './tts-service.js';
@@ -27,6 +31,18 @@ const SUNO_CONCURRENCY = 2;
 
 /** News block (TTS) interval */
 const NEWS_BLOCK_INTERVAL_MS = 15 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Get date-based subdirectory, creating it if needed. E.g. /app/media/songs/2026-03-02/ */
+function getDateDir(baseDir: string): string {
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const dir = path.join(baseDir, today);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -118,6 +134,9 @@ export class Pipeline {
     this.currentPhase = 'initializing';
     logger.info('Pipeline starting');
 
+    // Restore tracks from DB (so stream can start immediately)
+    this.restoreTracksFromDb();
+
     // Initialize Suno browser session
     await this.initSuno();
 
@@ -192,6 +211,7 @@ export class Pipeline {
       if (track.type === 'song' || track.type === 'podcast') {
         this.playedArchive.push(track);
       }
+      this.updatePlayCount(track.id);
       return track;
     }
 
@@ -202,11 +222,160 @@ export class Pipeline {
 
     const track = this.playedArchive[this.archivePosition % this.playedArchive.length];
     this.archivePosition++;
+    this.updatePlayCount(track.id);
     return track;
   }
 
   peekBuffer(): AudioBufferEntry[] {
     return [...this.audioBuffer];
+  }
+
+  /**
+   * Persist an audio track entry to the database.
+   */
+  private persistTrack(entry: AudioBufferEntry, cycleNumber?: number): void {
+    try {
+      const db = getDb();
+      db.insert(audioTracks)
+        .values({
+          id: entry.id,
+          type: entry.type,
+          title: entry.title,
+          filePath: entry.filePath,
+          durationSeconds: entry.durationSeconds,
+          metadata: entry.metadata,
+          createdAt: entry.createdAt,
+          cycleNumber: cycleNumber ?? this.cycleNumber,
+        })
+        .onConflictDoNothing()
+        .run();
+    } catch {
+      // Ignore duplicate inserts
+    }
+  }
+
+  /**
+   * Update play count in DB after a track is played.
+   */
+  private updatePlayCount(trackId: string): void {
+    try {
+      const db = getDb();
+      db.update(audioTracks)
+        .set({
+          playCount: sql`${audioTracks.playCount} + 1`,
+          lastPlayedAt: new Date(),
+        })
+        .where(eq(audioTracks.id, trackId))
+        .run();
+    } catch {
+      // Non-critical, don't crash
+    }
+  }
+
+  /**
+   * Restore audio buffer from DB on startup.
+   * Loads tracks that still exist on disk, sorted by newest first.
+   * Podcasts and songs go into archive for looping; fresh tracks (<24h) to buffer.
+   */
+  private restoreTracksFromDb(): void {
+    const db = getDb();
+    const rows = db
+      .select()
+      .from(audioTracks)
+      .orderBy(desc(audioTracks.createdAt))
+      .all();
+
+    const now = Date.now();
+    const freshThreshold = 24 * 60 * 60 * 1000; // 24h
+    let restored = 0;
+
+    for (const row of rows) {
+      if (!existsSync(row.filePath)) continue;
+
+      const entry: AudioBufferEntry = {
+        id: row.id,
+        type: row.type as AudioBufferEntry['type'],
+        title: row.title,
+        filePath: row.filePath,
+        durationSeconds: row.durationSeconds ?? undefined,
+        metadata: (row.metadata as Record<string, unknown>) ?? {},
+        createdAt: row.createdAt,
+      };
+
+      const age = now - row.createdAt.getTime();
+
+      if (age < freshThreshold) {
+        // Fresh tracks go to buffer (will be played first)
+        this.audioBuffer.push(entry);
+      } else if (row.type === 'song' || row.type === 'podcast') {
+        // Older songs/podcasts go to archive for looping
+        this.playedArchive.push(entry);
+      }
+      // Skip old news_blocks — they're stale
+
+      restored++;
+    }
+
+    // If DB was empty, scan disk for legacy files and import them
+    if (rows.length === 0) {
+      this.importLegacyFiles();
+    }
+
+    if (restored > 0) {
+      logger.info(
+        { restored, buffer: this.audioBuffer.length, archive: this.playedArchive.length },
+        'Audio tracks restored from DB',
+      );
+    }
+  }
+
+  /**
+   * One-time import of existing audio files from disk into DB.
+   * Scans songs/ and podcasts/ directories (including date subdirs).
+   */
+  private importLegacyFiles(): void {
+    const config = getConfig();
+    const db = getDb();
+    let imported = 0;
+
+    for (const [subdir, type] of [['songs', 'song'], ['podcasts', 'podcast']] as const) {
+      const baseDir = path.join(config.MEDIA_DIR, subdir);
+      if (!existsSync(baseDir)) continue;
+
+      const scanDir = (dir: string) => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          if (entry.isDirectory()) {
+            scanDir(path.join(dir, entry.name));
+          } else if (entry.name.endsWith('.mp3')) {
+            const filePath = path.join(dir, entry.name);
+            const id = entry.name.replace('.mp3', '');
+            const stat = statSync(filePath);
+
+            const audioEntry: AudioBufferEntry = {
+              id,
+              type,
+              title: `Legacy ${type}: ${id}`,
+              filePath,
+              metadata: {},
+              createdAt: stat.mtime,
+            };
+
+            this.persistTrack(audioEntry, 0);
+            this.playedArchive.push(audioEntry);
+            imported++;
+          }
+        }
+      };
+
+      scanDir(baseDir);
+    }
+
+    if (imported > 0) {
+      logger.info(
+        { imported, archive: this.playedArchive.length },
+        'Legacy audio files imported from disk',
+      );
+    }
   }
 
   /**
@@ -344,6 +513,7 @@ export class Pipeline {
 
         // Insert podcast at the beginning of the buffer so it plays first
         this.audioBuffer.unshift(entry);
+        this.persistTrack(entry);
         this.totalPodcastsGenerated++;
         podcastsProduced = 1;
 
@@ -449,7 +619,8 @@ export class Pipeline {
     this.pendingGeneration++;
     const id = nanoid();
     const config = getConfig();
-    const outputPath = path.join(config.MEDIA_DIR, 'songs', `${id}.mp3`);
+    const outputDir = getDateDir(path.join(config.MEDIA_DIR, 'songs'));
+    const outputPath = path.join(outputDir, `${id}.mp3`);
 
     try {
       const result = await this.sunoGenerator.generate({
@@ -477,6 +648,7 @@ export class Pipeline {
       };
 
       this.audioBuffer.push(entry);
+      this.persistTrack(entry);
       this.totalSongsGenerated++;
 
       logger.info(
@@ -495,7 +667,8 @@ export class Pipeline {
   private async generateNewsBlock(): Promise<void> {
     const id = nanoid();
     const config = getConfig();
-    const outputPath = path.join(config.MEDIA_DIR, 'news', `${id}.mp3`);
+    const outputDir = getDateDir(path.join(config.MEDIA_DIR, 'news'));
+    const outputPath = path.join(outputDir, `${id}.mp3`);
 
     try {
       const articles = await this.rssService.fetchOnce();
@@ -530,6 +703,7 @@ export class Pipeline {
       // Insert after first 3 songs so it breaks up the music
       const insertPosition = Math.min(3, this.audioBuffer.length);
       this.audioBuffer.splice(insertPosition, 0, entry);
+      this.persistTrack(entry);
       this.totalNewsBlocksGenerated++;
 
       logger.info(
@@ -559,7 +733,9 @@ export class Pipeline {
     this.streamManager = new StreamManager({
       rtmpUrl: config.YOUTUBE_RTMP_URL,
       streamKey: config.YOUTUBE_STREAM_KEY,
-      backgroundImage: path.join(config.MEDIA_DIR, 'background.png'),
+      backgroundImage: existsSync(path.join(config.MEDIA_DIR, 'background.png'))
+        ? path.join(config.MEDIA_DIR, 'background.png')
+        : path.resolve('assets/background.png'),
     });
 
     void this.streamManager.startStreaming(() => this.dequeueAudio());

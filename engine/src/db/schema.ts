@@ -69,7 +69,22 @@ export const articles = sqliteTable('articles', {
   storyHeadline: text('story_headline'),
 });
 
+export const audioTracks = sqliteTable('audio_tracks', {
+  id: text('id').primaryKey(),
+  type: text('type', { enum: ['song', 'podcast', 'news_block'] }).notNull(),
+  title: text('title').notNull(),
+  filePath: text('file_path').notNull(),
+  durationSeconds: integer('duration_seconds'),
+  metadata: text('metadata', { mode: 'json' }).$type<Record<string, unknown>>(),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  playCount: integer('play_count').notNull().default(0),
+  lastPlayedAt: integer('last_played_at', { mode: 'timestamp' }),
+  cycleNumber: integer('cycle_number'),
+});
+
 // Type exports
+export type AudioTrack = typeof audioTracks.$inferSelect;
+export type NewAudioTrack = typeof audioTracks.$inferInsert;
 export type Article = typeof articles.$inferSelect;
 export type NewArticle = typeof articles.$inferInsert;
 export type Content = typeof content.$inferSelect;

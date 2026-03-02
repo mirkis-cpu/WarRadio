@@ -194,18 +194,32 @@ async function injectCaptchaToken(page: Page, token: string): Promise<void> {
 // ─── AI Visual Captcha Solver (Claude CLI) ───────────────────────────
 
 const CAPTCHA_SELECTORS = [
+  // Arkose / FunCaptcha iframes
   'iframe[src*="arkoselabs"]',
   'iframe[src*="funcaptcha"]',
   'iframe[src*="captcha"]',
   'iframe[src*="challenges.cloudflare.com"]',
   'iframe[src*="turnstile"]',
+  // Generic captcha containers
   'div.cf-turnstile',
+  '#FunCaptcha',
+  '[id*="FunCaptcha"]',
+  '[id*="arkose"]',
+  '[class*="arkose"]',
   '[class*="captcha"]',
   '[id*="captcha"]',
   '[data-callback*="captcha"]',
+  'div[data-e2e*="captcha"]',
+  // FunCaptcha text prompts (various phrasings)
+  'text=/Pick all/i',
   'text=/Select all/i',
+  'text=/Select the image/i',
   'text=/Verify you are human/i',
   'text=/I am human/i',
+  'text=/Press and hold/i',
+  'text=/Choose the/i',
+  'text=/Match the/i',
+  'text=/Rotate the/i',
 ];
 
 const AI_SOLVE_MAX_ATTEMPTS = 3;
@@ -230,22 +244,31 @@ export async function detectVisualCaptcha(page: Page): Promise<boolean> {
     }
   }
 
-  // Also check nested frames for captcha content (Arkose uses nested iframes)
-  // But skip hcaptcha-assets iframes — they're passive/hidden and always present on Suno
+  // Check nested frames for captcha content (Arkose uses deeply nested iframes)
+  // Strategy 1: Match frame URLs against known captcha patterns
+  // Strategy 2: Detect frames with image grids (4+ images = likely captcha)
   for (const frame of page.frames()) {
     if (frame === page.mainFrame()) continue;
     const url = frame.url();
-    // Skip passive hcaptcha asset iframes (always loaded, never visible)
+
+    // Skip passive hcaptcha asset iframes (always loaded, never visible on Suno)
     if (url.includes('hcaptcha-assets') || url.includes('hcaptcha.html')) continue;
-    if (url.includes('arkoselabs') || url.includes('funcaptcha') || url.includes('captcha')) {
-      // Verify the iframe element is actually visible on the page
-      const frameElement = page.locator(`iframe[src*="${new URL(url).hostname}"]`).first();
-      const isVisible = await frameElement.isVisible({ timeout: 2_000 }).catch(() => false);
-      if (isVisible) {
-        logger.info({ url: url.slice(0, 120) }, 'Captcha iframe detected via frame URL (visible)');
+
+    // Check URL-based detection (known captcha iframe patterns)
+    if (url.includes('arkoselabs') || url.includes('funcaptcha') || url.includes('captcha') || url.includes('challenge')) {
+      logger.info({ url: url.slice(0, 120) }, 'Captcha iframe detected via frame URL');
+      return true;
+    }
+
+    // Check content-based detection: frames with 4+ images are likely captcha grids
+    try {
+      const imgCount = await frame.locator('img').count();
+      if (imgCount >= 4) {
+        logger.info({ url: url.slice(0, 120), imgCount }, 'Captcha frame detected via image grid count');
         return true;
       }
-      logger.debug({ url: url.slice(0, 120) }, 'Captcha iframe found but not visible — skipping');
+    } catch {
+      // Frame may be detached or cross-origin — skip
     }
   }
 
@@ -301,16 +324,23 @@ export async function solveVisualCaptchaWithAI(page: Page): Promise<boolean> {
  * Returns array of 1-based cell numbers to click.
  */
 async function askClaudeForCaptchaSolution(screenshotPath: string): Promise<number[]> {
-  const prompt = `Look at the image at this path and analyze the captcha: ${screenshotPath}
+  const prompt = `Look at this screenshot: ${screenshotPath}
 
-There is a visual captcha overlay with a grid of images and an instruction text (like "Select all objects that..." or similar).
+There is a visual CAPTCHA overlay (Arkose FunCaptcha) on the screen. It shows:
+- An instruction text at the top (e.g., "Pick all the objects a human can lift by hand", "Select all images with X", "Match the image", etc.)
+- A grid of images (typically 2x3 = 6 cells, or 3x3 = 9 cells)
 
-1. Read the instruction text from the captcha
-2. Look at each image in the grid
-3. Determine which images match the instruction
+Your task:
+1. Read the exact instruction text from the captcha
+2. Carefully examine each image in the grid
+3. Determine which images satisfy the instruction
 
-Number the grid cells 1, 2, 3... left-to-right, top-to-bottom.
-Return ONLY a JSON object, nothing else: {"clicks": [cell_numbers_to_click]}`;
+Number the grid cells starting from 1, going left-to-right, top-to-bottom:
+| 1 | 2 | 3 |
+| 4 | 5 | 6 |
+
+Return ONLY a JSON object: {"clicks": [cell_numbers_to_click]}
+Example: {"clicks": [1, 3, 5]}`;
 
   try {
     const { stdout } = await execFileAsync('claude', [

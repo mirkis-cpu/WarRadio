@@ -51,7 +51,8 @@ export class PodcastService {
 
     const config = getConfig();
     const id = nanoid();
-    const podcastDir = path.join(config.MEDIA_DIR, 'podcasts');
+    const today = new Date().toISOString().slice(0, 10);
+    const podcastDir = path.join(config.MEDIA_DIR, 'podcasts', today);
     const outputPath = path.join(podcastDir, `${id}.mp3`);
 
     // Ensure output directory exists

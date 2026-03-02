@@ -256,13 +256,21 @@ export class SunoGenerator {
    * Detect visual captcha overlay and attempt AI solve, then fall back to manual wait.
    */
   private async waitForCaptchaIfPresent(page: Page): Promise<void> {
-    await sleep(3000); // Give captcha time to appear
+    // Check for captcha multiple times — it may animate in with a delay
+    let hasCaptcha = false;
+    for (let check = 1; check <= 3; check++) {
+      await sleep(3000);
 
-    // Save debug screenshot
-    await page.screenshot({ path: './media/debug/captcha-check.png' }).catch(() => {});
-    logger.info('Captcha check screenshot saved: captcha-check.png');
+      // Save debug screenshot
+      await page.screenshot({ path: './media/debug/captcha-check.png' }).catch(() => {});
+      if (check === 1) logger.info('Captcha check screenshot saved: captcha-check.png');
 
-    const hasCaptcha = await detectVisualCaptcha(page);
+      hasCaptcha = await detectVisualCaptcha(page);
+      if (hasCaptcha) {
+        logger.info({ check }, 'Visual captcha detected on check attempt');
+        break;
+      }
+    }
     if (!hasCaptcha) return;
 
     logger.warn('Visual captcha detected — trying AI solver first...');

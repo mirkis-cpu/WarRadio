@@ -12,8 +12,8 @@ const YOUTUBE_RTMP_BASE = 'rtmp://a.rtmp.youtube.com/live2';
 // Video settings for YouTube Live
 const VIDEO_WIDTH = 1920;
 const VIDEO_HEIGHT = 1080;
-const VIDEO_FPS = 1; // Low FPS since it's mostly static
-const VIDEO_BITRATE = '1500k';
+const VIDEO_FPS = 15;
+const VIDEO_BITRATE = '3000k';
 const AUDIO_BITRATE = '192k';
 const AUDIO_SAMPLE_RATE = 44100;
 
@@ -286,7 +286,10 @@ export class StreamManager extends EventEmitter {
           // Killed by signal — expected on stop
           resolve();
         } else {
-          reject(new Error(`ffmpeg exited with code ${code}`));
+          // Log last 500 chars of stderr for debugging
+          const lastStderr = stderr.slice(-500).trim();
+          logger.error({ code, lastStderr }, 'ffmpeg failed');
+          reject(new Error(`ffmpeg exited with code ${code}: ${lastStderr}`));
         }
       });
 
@@ -304,14 +307,17 @@ export class StreamManager extends EventEmitter {
     }
   }
 
-  /** Escape special characters for ffmpeg drawtext filter */
+  /**
+   * Escape text for ffmpeg drawtext filter (single-quoted text='...' mode).
+   * Even in single-quoted mode, ':' is a key-value separator and must be escaped.
+   * We replace ' with Unicode typographic apostrophe to avoid breaking quotes.
+   */
   private escapeFFmpegText(text: string): string {
     return text
-      .replace(/\\/g, '\\\\\\\\')
-      .replace(/'/g, "\\'")
-      .replace(/:/g, '\\:')
-      .replace(/%/g, '%%')
-      .replace(/\[/g, '\\[')
-      .replace(/\]/g, '\\]');
+      .replace(/\\/g, '\\\\')
+      .replace(/'/g, '\u2019')   // ' → ' (typographic apostrophe, safe in quotes)
+      .replace(/:/g, '\\:')     // : is key-value separator even in quoted mode
+      .replace(/%/g, '%%')      // % needs doubling for drawtext expansion
+      .replace(/;/g, '\\;');    // ; is filter separator
   }
 }

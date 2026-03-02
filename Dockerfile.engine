@@ -51,6 +51,9 @@ COPY engine/tsconfig.json ./
 # Create data directories
 RUN mkdir -p /app/data/sessions /app/media/songs /app/media/podcasts /app/media/news /app/media/ads
 
+# Background image for YouTube Live stream overlay (stored outside /app/media volume mount)
+COPY src/assets/banner.png /app/assets/background.png
+
 ENV NODE_ENV=production
 EXPOSE 3001
 

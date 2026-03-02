@@ -83,6 +83,22 @@ export function getDb() {
       CREATE INDEX IF NOT EXISTS idx_articles_unused ON articles(used_at) WHERE used_at IS NULL;
       CREATE INDEX IF NOT EXISTS idx_articles_fetched ON articles(fetched_at);
 
+      CREATE TABLE IF NOT EXISTS audio_tracks (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL CHECK(type IN ('song', 'podcast', 'news_block')),
+        title TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        duration_seconds INTEGER,
+        metadata TEXT,
+        created_at INTEGER NOT NULL,
+        play_count INTEGER NOT NULL DEFAULT 0,
+        last_played_at INTEGER,
+        cycle_number INTEGER
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audio_tracks_type ON audio_tracks(type);
+      CREATE INDEX IF NOT EXISTS idx_audio_tracks_created ON audio_tracks(created_at);
+
       CREATE TABLE IF NOT EXISTS playback_log (
         id TEXT PRIMARY KEY,
         content_id TEXT REFERENCES content(id),

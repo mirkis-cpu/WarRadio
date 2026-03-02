@@ -28,7 +28,8 @@
       "Bash(brew:*)",
       "mcp__playwright__browser_navigate",
       "Bash(mkdir:*)",
-      "Bash(CLAUDECODE= claude:*)"
+      "Bash(CLAUDECODE= claude:*)",
+      "Bash(git commit:*)"
     ]
   }
 }
