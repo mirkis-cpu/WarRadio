@@ -231,12 +231,21 @@ export async function detectVisualCaptcha(page: Page): Promise<boolean> {
   }
 
   // Also check nested frames for captcha content (Arkose uses nested iframes)
+  // But skip hcaptcha-assets iframes — they're passive/hidden and always present on Suno
   for (const frame of page.frames()) {
     if (frame === page.mainFrame()) continue;
     const url = frame.url();
+    // Skip passive hcaptcha asset iframes (always loaded, never visible)
+    if (url.includes('hcaptcha-assets') || url.includes('hcaptcha.html')) continue;
     if (url.includes('arkoselabs') || url.includes('funcaptcha') || url.includes('captcha')) {
-      logger.info({ url: url.slice(0, 120) }, 'Captcha iframe detected via frame URL');
-      return true;
+      // Verify the iframe element is actually visible on the page
+      const frameElement = page.locator(`iframe[src*="${new URL(url).hostname}"]`).first();
+      const isVisible = await frameElement.isVisible({ timeout: 2_000 }).catch(() => false);
+      if (isVisible) {
+        logger.info({ url: url.slice(0, 120) }, 'Captcha iframe detected via frame URL (visible)');
+        return true;
+      }
+      logger.debug({ url: url.slice(0, 120) }, 'Captcha iframe found but not visible — skipping');
     }
   }
 
