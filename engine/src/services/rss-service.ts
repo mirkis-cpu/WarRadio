@@ -199,11 +199,13 @@ export class RssService extends EventEmitter {
     const usedCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     const unusedCutoff = new Date(Date.now() - MAX_ARTICLE_AGE_MS);
 
+    // Drizzle 'timestamp' mode stores as epoch seconds — use lt() with Date objects
+    // so Drizzle handles the conversion correctly
     const result1 = db.delete(articlesTable)
       .where(
         and(
           sql`${articlesTable.usedAt} IS NOT NULL`,
-          sql`${articlesTable.fetchedAt} < ${usedCutoff.getTime()}`,
+          sql`${articlesTable.fetchedAt} < ${Math.floor(usedCutoff.getTime() / 1000)}`,
         ),
       )
       .run();
@@ -212,7 +214,7 @@ export class RssService extends EventEmitter {
       .where(
         and(
           isNull(articlesTable.usedAt),
-          sql`${articlesTable.fetchedAt} < ${unusedCutoff.getTime()}`,
+          sql`${articlesTable.fetchedAt} < ${Math.floor(unusedCutoff.getTime() / 1000)}`,
         ),
       )
       .run();
