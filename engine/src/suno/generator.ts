@@ -339,15 +339,20 @@ export class SunoGenerator {
       const handler = async (response: Response) => {
         const url = response.url();
 
+        // Log ALL suno.com API responses for debugging
+        if (url.includes('suno.com') && url.includes('/api/')) {
+          logger.info({ url: url.slice(0, 150), status: response.status() }, 'Suno API response');
+        }
+
         // Suno API endpoints that return clip IDs
         if (
           !url.includes('suno.com') ||
-          (!url.includes('/generate') && !url.includes('/clips') && !url.includes('/songs'))
+          (!url.includes('/generate') && !url.includes('/clips') && !url.includes('/songs') && !url.includes('/create'))
         ) {
           return;
         }
 
-        logger.debug({ url, status: response.status() }, 'Intercepted Suno API response');
+        logger.info({ url, status: response.status() }, 'Intercepted Suno API response (matched filter)');
 
         if (response.status() < 200 || response.status() >= 300) {
           logger.warn({ url, status: response.status() }, 'Non-OK Suno API response');

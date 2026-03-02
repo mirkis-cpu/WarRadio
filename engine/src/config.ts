@@ -3,11 +3,14 @@ import { z } from 'zod';
 
 const envSchema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
+  AI_MODEL: z.string().default('claude-sonnet-4-20250514'),
   ENGINE_PORT: z.coerce.number().default(3001),
   DATABASE_PATH: z.string().default('./data/radiowar.db'),
   MEDIA_DIR: z.string().default(`${process.env.HOME}/Downloads/media`),
   SESSION_PATH: z.string().default('./data/sessions/storageState.json'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  SUNO_API_KEY: z.string().optional(),
+  SUNO_API_MODEL: z.string().default('V5'),
   SUNO_HEADLESS: z.coerce.boolean().default(true),
   SUNO_CAPTCHA_MODE: z.enum(['manual', '2captcha', 'skip']).default('manual'),
   CAPTCHA_2_API_KEY: z.string().optional(),
