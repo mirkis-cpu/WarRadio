@@ -1,9 +1,11 @@
 import Parser from 'rss-parser';
 import { EventEmitter } from 'events';
 import crypto from 'crypto';
+import { eq, isNull, desc, and, gt, sql } from 'drizzle-orm';
 import { logger } from '../utils/logger.js';
 import { withRetry } from '../utils/retry.js';
-import { sleep } from '../utils/sleep.js';
+import { getDb } from '../db/client.js';
+import { articles as articlesTable } from '../db/schema.js';
 
 export interface NewsArticle {
   id: string;
@@ -25,7 +27,6 @@ export interface RssServiceConfig {
   feeds: FeedConfig[];
   pollIntervalMs: number;
   warKeywords: string[];
-  maxSeenIds: number;
 }
 
 const DEFAULT_WAR_KEYWORDS = [
@@ -47,48 +48,8 @@ const DEFAULT_FEEDS: FeedConfig[] = [
   { url: 'https://news.google.com/rss/search?q=war+OR+conflict+OR+military&hl=en-US&gl=US&ceid=US:en', name: 'Google News War', enabled: true },
 ];
 
-const SEEN_IDS_MAX_DEFAULT = 5000;
-
-/** Simple LRU eviction: remove oldest entries when Set exceeds max size. */
-class BoundedSet<T> {
-  private readonly store: Map<T, number>;
-  private readonly maxSize: number;
-  private counter = 0;
-
-  constructor(maxSize: number) {
-    this.maxSize = maxSize;
-    this.store = new Map();
-  }
-
-  has(value: T): boolean {
-    return this.store.has(value);
-  }
-
-  add(value: T): void {
-    if (this.store.has(value)) return;
-
-    if (this.store.size >= this.maxSize) {
-      // Evict oldest entry (smallest counter)
-      let oldestKey: T | undefined;
-      let oldestCounter = Infinity;
-      for (const [k, c] of this.store) {
-        if (c < oldestCounter) {
-          oldestCounter = c;
-          oldestKey = k;
-        }
-      }
-      if (oldestKey !== undefined) {
-        this.store.delete(oldestKey);
-      }
-    }
-
-    this.store.set(value, this.counter++);
-  }
-
-  get size(): number {
-    return this.store.size;
-  }
-}
+/** Max age for articles to be considered fresh (48 hours) */
+const MAX_ARTICLE_AGE_MS = 48 * 60 * 60 * 1000;
 
 export interface RssServiceEvents {
   articles: (articles: NewsArticle[]) => void;
@@ -98,7 +59,6 @@ export interface RssServiceEvents {
 export class RssService extends EventEmitter {
   private readonly parser: Parser;
   private readonly config: RssServiceConfig;
-  private readonly seenIds: BoundedSet<string>;
   private running = false;
   private pollTimer: NodeJS.Timeout | null = null;
 
@@ -106,11 +66,9 @@ export class RssService extends EventEmitter {
     super();
     this.config = {
       feeds: config.feeds ?? DEFAULT_FEEDS,
-      pollIntervalMs: config.pollIntervalMs ?? 5 * 60 * 1000, // 5 minutes
+      pollIntervalMs: config.pollIntervalMs ?? 5 * 60 * 1000,
       warKeywords: config.warKeywords ?? DEFAULT_WAR_KEYWORDS,
-      maxSeenIds: config.maxSeenIds ?? SEEN_IDS_MAX_DEFAULT,
     };
-    this.seenIds = new BoundedSet(this.config.maxSeenIds);
     this.parser = new Parser({
       timeout: 15_000,
       headers: {
@@ -138,7 +96,10 @@ export class RssService extends EventEmitter {
     logger.info('RSS service stopped');
   }
 
-  /** Fetch all enabled feeds once and return new articles. */
+  /**
+   * Fetch all enabled feeds, persist new articles to DB.
+   * Returns all newly fetched articles.
+   */
   async fetchOnce(): Promise<NewsArticle[]> {
     const enabledFeeds = this.config.feeds.filter(f => f.enabled);
     const results = await Promise.allSettled(enabledFeeds.map(feed => this.fetchFeed(feed)));
@@ -150,8 +111,117 @@ export class RssService extends EventEmitter {
       }
     }
 
-    logger.info({ count: allNew.length, seenTotal: this.seenIds.size }, 'RSS fetch complete');
+    // Persist new articles to DB
+    if (allNew.length > 0) {
+      this.persistArticles(allNew);
+    }
+
+    const db = getDb();
+    const totalStored = db.select({ count: sql<number>`count(*)` }).from(articlesTable).get();
+    const unusedCount = db.select({ count: sql<number>`count(*)` }).from(articlesTable).where(isNull(articlesTable.usedAt)).get();
+
+    logger.info(
+      { newFetched: allNew.length, totalStored: totalStored?.count ?? 0, unused: unusedCount?.count ?? 0 },
+      'RSS fetch complete',
+    );
+
     return allNew;
+  }
+
+  /**
+   * Get articles that haven't been used yet, ordered by newest first.
+   * Only returns articles within maxAge (default 48h).
+   */
+  getUnusedArticles(maxAgeMs: number = MAX_ARTICLE_AGE_MS): NewsArticle[] {
+    const db = getDb();
+    const cutoff = new Date(Date.now() - maxAgeMs);
+
+    const rows = db
+      .select()
+      .from(articlesTable)
+      .where(
+        and(
+          isNull(articlesTable.usedAt),
+          gt(articlesTable.fetchedAt, cutoff),
+        ),
+      )
+      .orderBy(desc(articlesTable.fetchedAt))
+      .all();
+
+    return rows.map(row => ({
+      id: row.id,
+      source: row.source,
+      title: row.title,
+      description: row.description ?? '',
+      link: row.link,
+      publishedAt: row.publishedAt ?? row.fetchedAt,
+      fetchedAt: row.fetchedAt,
+    }));
+  }
+
+  /**
+   * Mark articles as used (for song or podcast).
+   */
+  markArticlesUsed(
+    articleIds: string[],
+    usedFor: string,
+    cycleNumber: number,
+    storyHeadline: string,
+  ): void {
+    const db = getDb();
+    const now = new Date();
+
+    for (const id of articleIds) {
+      db.update(articlesTable)
+        .set({
+          usedAt: now,
+          usedFor,
+          cycleNumber,
+          storyHeadline,
+        })
+        .where(eq(articlesTable.id, id))
+        .run();
+    }
+
+    logger.debug(
+      { count: articleIds.length, usedFor, storyHeadline },
+      'Articles marked as used',
+    );
+  }
+
+  /**
+   * Clean up old articles from DB.
+   * - Used articles older than 7 days → delete
+   * - Unused articles older than 48h → delete (stale)
+   */
+  cleanupOldArticles(): number {
+    const db = getDb();
+    const usedCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const unusedCutoff = new Date(Date.now() - MAX_ARTICLE_AGE_MS);
+
+    const result1 = db.delete(articlesTable)
+      .where(
+        and(
+          sql`${articlesTable.usedAt} IS NOT NULL`,
+          sql`${articlesTable.fetchedAt} < ${usedCutoff.getTime()}`,
+        ),
+      )
+      .run();
+
+    const result2 = db.delete(articlesTable)
+      .where(
+        and(
+          isNull(articlesTable.usedAt),
+          sql`${articlesTable.fetchedAt} < ${unusedCutoff.getTime()}`,
+        ),
+      )
+      .run();
+
+    const deleted = result1.changes + result2.changes;
+    if (deleted > 0) {
+      logger.info({ deleted }, 'Cleaned up old articles');
+    }
+    return deleted;
   }
 
   private async poll(): Promise<void> {
@@ -177,6 +247,7 @@ export class RssService extends EventEmitter {
       { maxAttempts: 3, baseDelay: 2000, label: `rss:${feed.name}` },
     );
 
+    const db = getDb();
     const articles: NewsArticle[] = [];
 
     for (const item of feedData.items) {
@@ -184,14 +255,15 @@ export class RssService extends EventEmitter {
       if (!link) continue;
 
       const id = this.articleId(link);
-      if (this.seenIds.has(id)) continue;
+
+      // Check if already in DB (persistent dedup)
+      const existing = db.select({ id: articlesTable.id }).from(articlesTable).where(eq(articlesTable.id, id)).get();
+      if (existing) continue;
 
       const title = item.title ?? '';
       const description = item.contentSnippet ?? item.content ?? item.summary ?? '';
 
       if (!this.matchesWarKeywords(title, description)) continue;
-
-      this.seenIds.add(id);
 
       articles.push({
         id,
@@ -206,6 +278,29 @@ export class RssService extends EventEmitter {
 
     logger.debug({ feed: feed.name, newArticles: articles.length }, 'Feed fetched');
     return articles;
+  }
+
+  private persistArticles(newArticles: NewsArticle[]): void {
+    const db = getDb();
+
+    for (const article of newArticles) {
+      try {
+        db.insert(articlesTable)
+          .values({
+            id: article.id,
+            link: article.link,
+            title: article.title,
+            source: article.source,
+            description: article.description,
+            publishedAt: article.publishedAt,
+            fetchedAt: article.fetchedAt,
+          })
+          .onConflictDoNothing()
+          .run();
+      } catch {
+        // Ignore duplicate insert errors
+      }
+    }
   }
 
   private articleId(link: string): string {

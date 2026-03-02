@@ -66,6 +66,23 @@ export function getDb() {
         updated_at INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS articles (
+        id TEXT PRIMARY KEY,
+        link TEXT NOT NULL,
+        title TEXT NOT NULL,
+        source TEXT NOT NULL,
+        description TEXT,
+        published_at INTEGER,
+        fetched_at INTEGER NOT NULL,
+        used_at INTEGER,
+        used_for TEXT,
+        cycle_number INTEGER,
+        story_headline TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_articles_unused ON articles(used_at) WHERE used_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_articles_fetched ON articles(fetched_at);
+
       CREATE TABLE IF NOT EXISTS playback_log (
         id TEXT PRIMARY KEY,
         content_id TEXT REFERENCES content(id),

@@ -262,22 +262,27 @@ export class Pipeline {
     this.lastCycleAt = new Date();
     const errors: string[] = [];
 
-    // ── Phase 1: RSS Fetch ──────────────────────────────────────────────────
+    // ── Phase 1: RSS Fetch + Get Unused Articles ──────────────────────────
     this.currentPhase = 'scraping';
     logger.info({ cycle: this.cycleNumber }, 'Phase 1: Fetching RSS feeds');
 
-    let articles: NewsArticle[] = [];
     try {
-      articles = await this.rssService.fetchOnce();
+      await this.rssService.fetchOnce();
     } catch (err) {
       const msg = `RSS fetch failed: ${String(err)}`;
       logger.error({ err }, msg);
       errors.push(msg);
     }
 
-    logger.info({ articleCount: articles.length }, 'RSS fetch complete');
+    // Clean up old articles periodically
+    this.rssService.cleanupOldArticles();
+
+    // Get only unused, fresh articles for synthesis
+    const articles = this.rssService.getUnusedArticles();
+    logger.info({ unusedArticleCount: articles.length }, 'Unused articles available');
 
     if (articles.length === 0) {
+      logger.warn('No unused articles available — skipping cycle');
       this.currentPhase = 'idle';
       return { articlesScraped: 0, storiesSynthesized: 0, lyricsGenerated: 0, songsProduced: 0, podcastsProduced: 0, errors };
     }
@@ -295,6 +300,18 @@ export class Pipeline {
       errors.push(msg);
       this.currentPhase = 'idle';
       return { articlesScraped: articles.length, storiesSynthesized: 0, lyricsGenerated: 0, songsProduced: 0, podcastsProduced: 0, errors };
+    }
+
+    // Mark all used articles in DB
+    for (const story of stories) {
+      if (story.sourceArticleIds.length > 0) {
+        this.rssService.markArticlesUsed(
+          story.sourceArticleIds,
+          'synthesis',
+          this.cycleNumber,
+          story.headline,
+        );
+      }
     }
 
     logger.info(
@@ -454,6 +471,7 @@ export class Pipeline {
           storyHeadline: lyrics.storyHeadline,
           storyAngle: lyrics.storyAngle,
           sunoStyle: lyrics.genre.sunoStyle,
+          sourceArticleIds: lyrics.sourceArticleIds,
         },
         createdAt: new Date(),
       };

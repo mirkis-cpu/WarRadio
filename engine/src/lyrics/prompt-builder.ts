@@ -76,9 +76,11 @@ EDITORIAL STANCE:
 - Always frame from the perspective of protecting democracy and freedom
 - Be confident, matter-of-fact, and patriotic — never preachy or apologetic
 
-DEDUPLICATION:
-- Multiple articles about the SAME event from different sources = ONE story (merge all facts together)
+ARTICLE GROUPING (IMPORTANT):
+- Group 2-4 related articles into each story — merge facts from multiple sources for richer stories
 - Each of the ${targetCount} stories must cover a DISTINCT event or angle
+- ALWAYS include the sourceArticleIds for ALL articles you used in each story — this is critical for tracking
+- Prefer the most RECENT and impactful articles — freshness matters
 - If fewer than ${targetCount} distinct events exist, split major events into different angles:
   (e.g., "US strikes Iran" → military victory angle, diplomatic strength angle, troop valor angle)
 

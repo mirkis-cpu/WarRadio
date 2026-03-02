@@ -55,7 +55,23 @@ export const playbackLog = sqliteTable('playback_log', {
   source: text('source', { enum: ['rotation', 'scheduled', 'override', 'manual'] }).notNull(),
 });
 
+export const articles = sqliteTable('articles', {
+  id: text('id').primaryKey(),
+  link: text('link').notNull(),
+  title: text('title').notNull(),
+  source: text('source').notNull(),
+  description: text('description'),
+  publishedAt: integer('published_at', { mode: 'timestamp' }),
+  fetchedAt: integer('fetched_at', { mode: 'timestamp' }).notNull(),
+  usedAt: integer('used_at', { mode: 'timestamp' }),
+  usedFor: text('used_for'),
+  cycleNumber: integer('cycle_number'),
+  storyHeadline: text('story_headline'),
+});
+
 // Type exports
+export type Article = typeof articles.$inferSelect;
+export type NewArticle = typeof articles.$inferInsert;
 export type Content = typeof content.$inferSelect;
 export type NewContent = typeof content.$inferInsert;
 export type ScheduleSlot = typeof scheduleSlots.$inferSelect;

@@ -21,6 +21,7 @@ export interface GeneratedLyrics {
   genre: GenreDefinition;
   storyHeadline: string;
   storyAngle: string;
+  sourceArticleIds: string[];
   generatedAt: Date;
 }
 
@@ -145,6 +146,7 @@ export class LyricsService {
       genre: selectedGenre,
       storyHeadline: story.headline,
       storyAngle: story.angle,
+      sourceArticleIds: story.sourceArticleIds,
       generatedAt: new Date(),
     };
   }
