@@ -13,6 +13,7 @@ services:
       - engine-data:/app/data
       - engine-media:/app/media
       - /root/.claude:/root/.claude:ro
+      - /root/.claude.json:/root/.claude.json:ro
     networks:
       - radiowar
     healthcheck:
