@@ -61,7 +61,7 @@ export class LyricsService {
       async () => {
         const response = await callClaudeCli(userPrompt, {
           systemPrompt,
-          timeout: 180_000,
+          timeout: 300_000, // 5 minutes — 200+ articles need more processing time
         });
         return parseSynthesisResponse(response);
       },

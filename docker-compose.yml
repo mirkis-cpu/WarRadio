@@ -12,7 +12,7 @@ services:
     volumes:
       - engine-data:/app/data
       - engine-media:/app/media
-      - /root/.claude:/root/.claude:ro
+      - /root/.claude:/root/.claude
       - /root/.claude.json:/root/.claude.json:ro
     networks:
       - radiowar
