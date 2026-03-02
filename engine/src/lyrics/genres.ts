@@ -10,39 +10,39 @@ export interface GenreDefinition {
 
 export const GENRES: GenreDefinition[] = [
   {
-    name: 'punk-rock',
-    sunoStyle: 'punk rock, distorted guitar, fast tempo, aggressive, raw energy, 1980s punk',
-    claudePersonality: 'angry punk band writing protest songs about government failure and war profiteering',
+    name: 'boom-bap',
+    sunoStyle: 'boom bap, 90s hip hop, vinyl crackle, jazzy samples, hard drums, conscious rap, storytelling',
+    claudePersonality: 'veteran street journalist rapper spitting raw truth about war like a 90s NYC MC — vivid imagery, punchlines, wordplay',
+    verseCount: 3, hasChorus: true, hasBridge: true, weight: 8,
+  },
+  {
+    name: 'trap',
+    sunoStyle: 'trap, 808 bass, dark hi-hats, atmospheric, hard-hitting, aggressive flow, modern rap',
+    claudePersonality: 'aggressive modern rapper turning war chaos into hard-hitting trap anthems — short punchy bars, ad-libs, intensity',
+    verseCount: 2, hasChorus: true, hasBridge: false, weight: 7,
+  },
+  {
+    name: 'lofi-hiphop',
+    sunoStyle: 'lo-fi hip hop, chill beats, vinyl crackle, jazz piano samples, mellow, relaxing, downtempo rap',
+    claudePersonality: 'reflective poet-rapper delivering war commentary over chill beats — introspective, smooth flow, melancholic wisdom',
+    verseCount: 2, hasChorus: true, hasBridge: false, weight: 8,
+  },
+  {
+    name: 'drill',
+    sunoStyle: 'UK drill, sliding 808s, dark piano, aggressive, fast flow, gritty, menacing beat',
+    claudePersonality: 'frontline war reporter turned drill MC — rapid-fire bars about battlefield reality, no sugar coating, raw and menacing',
     verseCount: 2, hasChorus: true, hasBridge: false, weight: 5,
   },
   {
-    name: 'rap',
-    sunoStyle: 'hip hop, boom bap, conscious rap, hard-hitting beats, storytelling flow',
-    claudePersonality: 'street journalist rapper turning war dispatches into bars with vivid imagery and wordplay',
-    verseCount: 3, hasChorus: true, hasBridge: true, weight: 5,
+    name: 'melodic-rap',
+    sunoStyle: 'melodic rap, auto-tune vocals, emotional, atmospheric synths, modern R&B hip hop, catchy hooks',
+    claudePersonality: 'emotional melodic rapper singing about the human cost of war — refugees, families torn apart, hope in darkness',
+    verseCount: 2, hasChorus: true, hasBridge: true, weight: 6,
   },
   {
-    name: 'folk',
-    sunoStyle: 'acoustic folk, fingerpicking guitar, storytelling, melancholic, Bob Dylan-esque',
-    claudePersonality: 'traveling folk singer bearing witness to conflict, melancholic but hopeful, poetic imagery',
-    verseCount: 3, hasChorus: true, hasBridge: false, weight: 5,
-  },
-  {
-    name: 'electronic',
-    sunoStyle: 'dark synth, electronic, industrial, driving beat, atmospheric, dystopian',
-    claudePersonality: 'cyberpunk poet writing about the machinery of war, surveillance states, and digital battlefields',
-    verseCount: 2, hasChorus: true, hasBridge: true, weight: 5,
-  },
-  {
-    name: 'blues',
-    sunoStyle: 'delta blues, slide guitar, soulful vocals, slow groove, raw emotion',
-    claudePersonality: 'blues musician singing about loss, displacement, and resilience of conflict survivors',
-    verseCount: 3, hasChorus: false, hasBridge: false, weight: 3,
-  },
-  {
-    name: 'country',
-    sunoStyle: 'country, twang guitar, acoustic, heartfelt storytelling, Americana',
-    claudePersonality: 'country songwriter telling the human stories behind war headlines, small-town perspective',
-    verseCount: 2, hasChorus: true, hasBridge: false, weight: 3,
+    name: 'conscious-rap',
+    sunoStyle: 'conscious hip hop, soulful samples, live drums, spoken word, political rap, powerful delivery',
+    claudePersonality: 'political conscious rapper like Kendrick/Immortal Technique — deep analysis of war, power structures, propaganda, systemic critique',
+    verseCount: 3, hasChorus: true, hasBridge: true, weight: 6,
   },
 ];
