@@ -12,6 +12,7 @@ const envSchema = z.object({
   SUNO_CAPTCHA_MODE: z.enum(['manual', '2captcha', 'skip']).default('manual'),
   CAPTCHA_2_API_KEY: z.string().optional(),
   YOUTUBE_RTMP_URL: z.string().default('rtmp://a.rtmp.youtube.com/live2'),
+  YOUTUBE_RTMP_BACKUP_URL: z.string().default('rtmp://b.rtmp.youtube.com/live2?backup=1'),
   YOUTUBE_STREAM_KEY: z.string().optional(),
   FONT_PATH: z.string().default('/System/Library/Fonts/Helvetica.ttc'),
   CORS_ORIGINS: z.string().optional(),
