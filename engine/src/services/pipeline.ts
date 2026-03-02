@@ -11,8 +11,7 @@ import { RssService, type NewsArticle } from './rss-service.js';
 import { LyricsService, type GeneratedLyrics, type SynthesizedStory } from './lyrics-service.js';
 import { TtsService } from './tts-service.js';
 import { PodcastService } from './podcast-service.js';
-import { SunoSession } from '../suno/session.js';
-import { SunoGenerator } from '../suno/generator.js';
+import { SunoApiGenerator, type SunoApiResult } from '../suno/api-generator.js';
 import { downloadAudio } from '../suno/downloader.js';
 import { StreamManager, type StreamStatus } from './stream-manager.js';
 
@@ -20,13 +19,17 @@ import { StreamManager, type StreamStatus } from './stream-manager.js';
 // Configuration
 // ---------------------------------------------------------------------------
 
-/** How many songs to generate per cycle (10 songs × ~3min = ~30min of content) */
-const SONGS_PER_CYCLE = 10;
+/** How many songs to generate per cycle.
+ *  Budget: ~$30/month via sunoapi.org ($0.005/credit, ~12 credits/song = $0.06/song)
+ *  4 cycles/day × 4 songs = 16 songs/day = 480/month = ~$29/month
+ *  Each API call produces 2 songs, so 4 songs = 2 API calls per cycle.
+ */
+const SONGS_PER_CYCLE = 4;
 
-/** Interval between production cycles (6x/day = every 4 hours) */
-const CYCLE_INTERVAL_MS = 4 * 60 * 60 * 1000;
+/** Interval between production cycles (4x/day = every 6 hours) */
+const CYCLE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
-/** Max concurrent Suno generation requests */
+/** Max concurrent Suno API requests (API limit: 20 req / 10s, but we stay conservative) */
 const SUNO_CONCURRENCY = 2;
 
 /** News block (TTS) interval */
@@ -90,8 +93,7 @@ export class Pipeline {
   private readonly lyricsService: LyricsService;
   private readonly ttsService: TtsService;
   private readonly podcastService: PodcastService;
-  private sunoSession: SunoSession | null = null;
-  private sunoGenerator: SunoGenerator | null = null;
+  private sunoGenerator: SunoApiGenerator | null = null;
   private streamManager: StreamManager | null = null;
 
   /** Queue of tracks to play — new songs go here first */
@@ -137,8 +139,8 @@ export class Pipeline {
     // Restore tracks from DB (so stream can start immediately)
     this.restoreTracksFromDb();
 
-    // Initialize Suno browser session
-    await this.initSuno();
+    // Initialize Suno API generator
+    this.initSunoApi();
 
     // Schedule periodic news blocks via TTS
     this.newsBlockTimer = setInterval(() => {
@@ -173,11 +175,7 @@ export class Pipeline {
       this.newsBlockTimer = null;
     }
 
-    if (this.sunoSession) {
-      await this.sunoSession.destroy();
-      this.sunoSession = null;
-      this.sunoGenerator = null;
-    }
+    this.sunoGenerator = null;
 
     this.currentPhase = 'idle';
     logger.info('Pipeline stopped');
@@ -555,7 +553,7 @@ export class Pipeline {
     if (this.sunoGenerator) {
       songsProduced = await this.generateSongBatch(allLyrics, errors);
     } else {
-      const msg = 'Suno not initialized — skipping song generation. Run: npm run suno:login';
+      const msg = 'Suno API not initialized — skipping song generation. Set SUNO_API_KEY in .env';
       logger.warn(msg);
       errors.push(msg);
     }
@@ -581,8 +579,12 @@ export class Pipeline {
     lyrics: GeneratedLyrics[],
     errors: string[],
   ): Promise<number> {
+    if (!this.sunoGenerator) return 0;
+
     let produced = 0;
 
+    // Each API call produces 2 songs. Process lyrics one at a time (each gets 2 variants).
+    // With SUNO_CONCURRENCY=2, we send 2 API calls in parallel = 4 songs.
     for (let i = 0; i < lyrics.length; i += SUNO_CONCURRENCY) {
       if (!this.running) break;
 
@@ -592,16 +594,16 @@ export class Pipeline {
 
       logger.info(
         { batch: batchNum, total: totalBatches, titles: batch.map((l) => l.title) },
-        'Generating song batch',
+        'Generating song batch via API',
       );
 
       const results = await Promise.allSettled(
-        batch.map((l) => this.generateSingleSong(l)),
+        batch.map((l) => this.generateSongViaApi(l)),
       );
 
       for (const result of results) {
         if (result.status === 'fulfilled') {
-          produced++;
+          produced += result.value;
         } else {
           const msg = `Song generation failed: ${String(result.reason)}`;
           logger.error(msg);
@@ -613,48 +615,62 @@ export class Pipeline {
     return produced;
   }
 
-  private async generateSingleSong(lyrics: GeneratedLyrics): Promise<void> {
-    if (!this.sunoGenerator) throw new Error('Suno not initialized');
+  /**
+   * Generate song(s) via Suno API. Each call returns 2 song variants.
+   * We download the first (best) one and add it to the buffer.
+   */
+  private async generateSongViaApi(lyrics: GeneratedLyrics): Promise<number> {
+    if (!this.sunoGenerator) throw new Error('Suno API not initialized');
 
     this.pendingGeneration++;
-    const id = nanoid();
     const config = getConfig();
     const outputDir = getDateDir(path.join(config.MEDIA_DIR, 'songs'));
-    const outputPath = path.join(outputDir, `${id}.mp3`);
 
     try {
-      const result = await this.sunoGenerator.generate({
+      const results = await this.sunoGenerator.generate({
         style: lyrics.genre.sunoStyle,
         lyrics: lyrics.lyrics,
         title: lyrics.title,
       });
 
-      await downloadAudio(result.audioUrl, outputPath);
+      // Use the first result (best variant)
+      let saved = 0;
+      for (const result of results.slice(0, 1)) {
+        const id = nanoid();
+        const outputPath = path.join(outputDir, `${id}.mp3`);
 
-      const entry: AudioBufferEntry = {
-        id,
-        type: 'song',
-        title: lyrics.title,
-        filePath: outputPath,
-        metadata: {
-          genre: lyrics.genre.name,
-          clipId: result.clipId,
-          storyHeadline: lyrics.storyHeadline,
-          storyAngle: lyrics.storyAngle,
-          sunoStyle: lyrics.genre.sunoStyle,
-          sourceArticleIds: lyrics.sourceArticleIds,
-        },
-        createdAt: new Date(),
-      };
+        await downloadAudio(result.audioUrl, outputPath);
 
-      this.audioBuffer.push(entry);
-      this.persistTrack(entry);
-      this.totalSongsGenerated++;
+        const entry: AudioBufferEntry = {
+          id,
+          type: 'song',
+          title: lyrics.title,
+          filePath: outputPath,
+          durationSeconds: Math.round(result.duration),
+          metadata: {
+            genre: lyrics.genre.name,
+            clipId: result.clipId,
+            storyHeadline: lyrics.storyHeadline,
+            storyAngle: lyrics.storyAngle,
+            sunoStyle: lyrics.genre.sunoStyle,
+            sourceArticleIds: lyrics.sourceArticleIds,
+            apiDuration: result.duration,
+          },
+          createdAt: new Date(),
+        };
 
-      logger.info(
-        { title: lyrics.title, genre: lyrics.genre.name, bufferSize: this.audioBuffer.length },
-        'Song added to buffer',
-      );
+        this.audioBuffer.push(entry);
+        this.persistTrack(entry);
+        this.totalSongsGenerated++;
+        saved++;
+
+        logger.info(
+          { title: lyrics.title, genre: lyrics.genre.name, clipId: result.clipId, bufferSize: this.audioBuffer.length },
+          'Song added to buffer (via API)',
+        );
+      }
+
+      return saved;
     } finally {
       this.pendingGeneration--;
     }
@@ -773,29 +789,30 @@ export class Pipeline {
   }
 
   // ---------------------------------------------------------------------------
-  // Suno initialization
+  // Suno API initialization
   // ---------------------------------------------------------------------------
 
-  private async initSuno(): Promise<void> {
+  private initSunoApi(): void {
     const config = getConfig();
 
+    if (!config.SUNO_API_KEY) {
+      logger.warn('SUNO_API_KEY not set — song generation disabled. Get a key at https://sunoapi.org/api-key');
+      return;
+    }
+
     try {
-      this.sunoSession = new SunoSession();
-      await this.sunoSession.initialize(config.SUNO_HEADLESS);
+      this.sunoGenerator = new SunoApiGenerator();
 
-      const isAuthed = await this.sunoSession.verifySession();
-      if (!isAuthed) {
-        logger.warn(
-          'Suno session not authenticated — songs will not be generated. Run: npm run suno:login',
-        );
-      } else {
-        logger.info('Suno session verified');
-      }
+      // Check credits asynchronously
+      this.sunoGenerator.getCredits().then((credits) => {
+        logger.info({ credits }, 'Suno API initialized — remaining credits');
+      }).catch((err) => {
+        logger.warn({ err: String(err) }, 'Could not check Suno API credits');
+      });
 
-      this.sunoGenerator = new SunoGenerator(this.sunoSession);
+      logger.info({ model: config.SUNO_API_MODEL }, 'Suno API generator initialized');
     } catch (err) {
-      logger.error({ err }, 'Suno initialization failed — song generation disabled');
-      this.sunoSession = null;
+      logger.error({ err }, 'Suno API initialization failed — song generation disabled');
       this.sunoGenerator = null;
     }
   }
