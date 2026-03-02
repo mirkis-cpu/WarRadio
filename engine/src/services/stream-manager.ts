@@ -159,7 +159,7 @@ export class StreamManager extends EventEmitter {
       const headlineText = headline
         ? this.escapeFFmpegText(headline)
         : '';
-      const timeText = '%{localtime\\:%H\\\\:%M}';
+      const timeText = '%{localtime\\:%H\\:%M}';
 
       // Build filter: background + text overlays
       const bgImage = this.config.backgroundImage && existsSync(this.config.backgroundImage)
@@ -180,40 +180,42 @@ export class StreamManager extends EventEmitter {
         );
       }
 
+      const f = `fontfile=${fontPath}`;
+
       // LIVE badge (top-right)
       filterParts.push(
-        `[bg]drawtext=text='LIVE':fontcolor=red:fontsize=36:x=${VIDEO_WIDTH - 150}:y=30:fontfile=${fontPath}[v1]`,
+        `[bg]drawtext=text='LIVE':fontcolor=red:fontsize=36:x=${VIDEO_WIDTH - 150}:y=30:${f}[v1]`,
       );
 
       // Station name (top-left)
       filterParts.push(
-        `[v1]drawtext=text='RadioWar':fontcolor=white:fontsize=48:x=60:y=30[v2]`,
+        `[v1]drawtext=text='RadioWar':fontcolor=white:fontsize=48:x=60:y=30:${f}[v2]`,
       );
 
       // Clock (top-right, below LIVE)
       filterParts.push(
-        `[v2]drawtext=text='${timeText}':fontcolor=white@0.7:fontsize=28:x=${VIDEO_WIDTH - 160}:y=75[v3]`,
+        `[v2]drawtext=text='${timeText}':fontcolor=white@0.7:fontsize=28:x=${VIDEO_WIDTH - 160}:y=75:${f}[v3]`,
       );
 
       // Now Playing label
       filterParts.push(
-        `[v3]drawtext=text='NOW PLAYING':fontcolor=0xaaaaaa:fontsize=24:x=60:y=${VIDEO_HEIGHT - 220}[v4]`,
+        `[v3]drawtext=text='NOW PLAYING':fontcolor=0xaaaaaa:fontsize=24:x=60:y=${VIDEO_HEIGHT - 220}:${f}[v4]`,
       );
 
       // Song title (big)
       filterParts.push(
-        `[v4]drawtext=text='${nowPlayingText}':fontcolor=white:fontsize=56:x=60:y=${VIDEO_HEIGHT - 180}[v5]`,
+        `[v4]drawtext=text='${nowPlayingText}':fontcolor=white:fontsize=56:x=60:y=${VIDEO_HEIGHT - 180}:${f}[v5]`,
       );
 
       // Genre badge
       filterParts.push(
-        `[v5]drawtext=text='${genreText}':fontcolor=0x8b5cf6:fontsize=28:x=60:y=${VIDEO_HEIGHT - 110}[v6]`,
+        `[v5]drawtext=text='${genreText}':fontcolor=0x8b5cf6:fontsize=28:x=60:y=${VIDEO_HEIGHT - 110}:${f}[v6]`,
       );
 
       // Headline ticker (if available)
       if (headlineText) {
         filterParts.push(
-          `[v6]drawtext=text='${headlineText}':fontcolor=0xfbbf24:fontsize=22:x=60:y=${VIDEO_HEIGHT - 70}[vout]`,
+          `[v6]drawtext=text='${headlineText}':fontcolor=0xfbbf24:fontsize=22:x=60:y=${VIDEO_HEIGHT - 70}:${f}[vout]`,
         );
       } else {
         filterParts.push(`[v6]copy[vout]`);
