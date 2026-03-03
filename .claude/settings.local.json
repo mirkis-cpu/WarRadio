@@ -29,7 +29,8 @@
       "mcp__playwright__browser_navigate",
       "Bash(mkdir:*)",
       "Bash(CLAUDECODE= claude:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }

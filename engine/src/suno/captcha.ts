@@ -1,12 +1,12 @@
 import type { Page, Frame } from 'playwright';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
+import { spawn } from 'child_process';
 import path from 'path';
+import { writeFile, unlink } from 'fs/promises';
+import { tmpdir } from 'os';
+import { nanoid } from 'nanoid';
 import { logger } from '../utils/logger.js';
 import { sleep } from '../utils/sleep.js';
 import { getConfig } from '../config.js';
-
-const execFileAsync = promisify(execFile);
 
 const HCAPTCHA_IFRAME_SELECTOR = 'iframe[src*="hcaptcha.com"]';
 const MANUAL_WAIT_MS = 120_000; // 2 minutes
@@ -226,85 +226,93 @@ const AI_SOLVE_MAX_ATTEMPTS = 3;
 
 /** Detect visual captcha overlay (Arkose FunCaptcha, image grid, etc.) */
 export async function detectVisualCaptcha(page: Page): Promise<boolean> {
-  // Log all iframes on the page for debugging
-  const iframes = await page.locator('iframe').all();
-  for (const iframe of iframes) {
-    const src = await iframe.getAttribute('src').catch(() => '');
-    if (src) logger.debug({ src: src.slice(0, 120) }, 'iframe found on page');
+  // Step 1: Check for visible overlay/modal via page.evaluate() — most reliable.
+  // Arkose FunCaptcha renders a modal overlay with high z-index.
+  // Also check for any large visible iframe that could be a captcha embed.
+  const overlayCheck = await page.evaluate(() => {
+    const doc = (globalThis as any).document;
+    if (!doc) return { hasOverlay: false, detail: 'no document' };
+    const win = globalThis as any;
+
+    // Check for FunCaptcha wrapper by ID
+    const fcWrap = doc.querySelector('#fc-iframe-wrap');
+    if (fcWrap && fcWrap.offsetHeight > 100) {
+      return { hasOverlay: true, detail: 'fc-iframe-wrap found' };
+    }
+
+    // Check for any large element with high z-index (captcha modals use z-index > 9999)
+    const allElements = doc.querySelectorAll('div, section, aside, [role="dialog"]');
+    for (const el of allElements) {
+      const style = win.getComputedStyle(el);
+      const zIndex = parseInt(style.zIndex, 10);
+      if (zIndex > 9999 && el.offsetWidth > 200 && el.offsetHeight > 200) {
+        return { hasOverlay: true, detail: `high-z element z=${zIndex} ${el.offsetWidth}x${el.offsetHeight}` };
+      }
+    }
+
+    // Check for large visible iframes (hidden hcaptcha iframes are 0x0)
+    const iframes = doc.querySelectorAll('iframe');
+    for (const iframe of iframes) {
+      const src = iframe.src || '';
+      // Skip known passive/hidden hcaptcha iframes
+      if (src.includes('hcaptcha') && !src.includes('challenge')) continue;
+      // Skip tiny hidden iframes
+      if (iframe.offsetWidth < 200 || iframe.offsetHeight < 200) continue;
+      return { hasOverlay: true, detail: `large iframe ${iframe.offsetWidth}x${iframe.offsetHeight} src=${src.slice(0, 80)}` };
+    }
+
+    return { hasOverlay: false, detail: 'no overlay found' };
+  }).catch(() => ({ hasOverlay: false, detail: 'evaluate failed' }));
+
+  if (overlayCheck.hasOverlay) {
+    logger.info({ detail: overlayCheck.detail }, 'Captcha overlay detected via page evaluate');
+    return true;
   }
 
-  // Check selectors on main page (visible check)
+  // Step 2: Check known selectors on main page
   for (const selector of CAPTCHA_SELECTORS) {
-    const count = await page.locator(selector).count();
-    if (count > 0) {
-      const el = page.locator(selector).first();
-      const visible = await el.isVisible({ timeout: 2_000 }).catch(() => false);
-      logger.info({ selector, count, visible }, 'Captcha selector match');
-      if (visible) return true;
+    try {
+      const count = await page.locator(selector).count();
+      if (count > 0) {
+        const el = page.locator(selector).first();
+        const visible = await el.isVisible({ timeout: 1_000 }).catch(() => false);
+        if (visible) {
+          logger.info({ selector, count }, 'Captcha selector match (visible)');
+          return true;
+        }
+      }
+    } catch {
+      // Selector may be invalid for current page state
     }
   }
 
-  // Check nested frames for captcha content (Arkose uses deeply nested iframes)
-  let captchaFrameCount = 0;
+  // Step 3: Check nested frames for captcha content
   for (const frame of page.frames()) {
     if (frame === page.mainFrame()) continue;
     const url = frame.url();
 
-    // Skip passive hcaptcha asset iframes (always loaded, never visible on Suno)
+    // Skip passive hcaptcha iframes
     if (url.includes('hcaptcha-assets') || url.includes('hcaptcha.html')) continue;
 
-    // Check URL-based detection (known captcha iframe patterns)
+    // URL-based detection
     if (url.includes('arkoselabs') || url.includes('funcaptcha')) {
       logger.info({ url: url.slice(0, 120) }, 'Captcha iframe detected via frame URL');
       return true;
     }
 
-    // Track captcha-related frames (but don't immediately return — could be hidden enforcement)
-    if (url.includes('captcha') || url.includes('challenge')) {
-      captchaFrameCount++;
-    }
-
-    // Check content-based detection: frames with 4+ images are likely captcha grids
+    // Content-based: frame with 4+ images is likely captcha grid
     try {
       const imgCount = await frame.locator('img').count();
       if (imgCount >= 4) {
-        logger.info({ url: url.slice(0, 120), imgCount }, 'Captcha frame detected via image grid count');
+        logger.info({ url: url.slice(0, 120), imgCount }, 'Captcha frame detected via image grid');
         return true;
       }
     } catch {
-      // Frame may be detached or cross-origin — skip
+      // Cross-origin or detached — skip
     }
   }
 
-  // If captcha-related frames exist (even hidden), check for visible overlay via page evaluate.
-  // Arkose FunCaptcha renders a visible modal overlay on the main page even when its
-  // enforcement iframes are hidden. Check for large visible overlays with high z-index.
-  if (captchaFrameCount > 0) {
-    const hasOverlay = await page.evaluate(() => {
-      const doc = (globalThis as any).document;
-      if (!doc) return false;
-      // Check for FunCaptcha wrapper
-      const fcWrap = doc.querySelector('#fc-iframe-wrap');
-      if (fcWrap && fcWrap.offsetHeight > 100) return true;
-      // Check for any large overlay with high z-index (captcha dialogs use z-index > 10000)
-      const allDivs = doc.querySelectorAll('div');
-      for (const div of allDivs) {
-        const style = (globalThis as any).getComputedStyle(div);
-        const zIndex = parseInt(style.zIndex, 10);
-        if (zIndex > 10000 && div.offsetWidth > 200 && div.offsetHeight > 200) {
-          return true;
-        }
-      }
-      return false;
-    }).catch(() => false);
-
-    if (hasOverlay) {
-      logger.info({ captchaFrameCount }, 'Captcha overlay detected via high z-index element + captcha frames');
-      return true;
-    }
-  }
-
-  logger.info('No visual captcha detected');
+  logger.info({ overlayDetail: overlayCheck.detail }, 'No visual captcha detected');
   return false;
 }
 
@@ -353,12 +361,13 @@ export async function solveVisualCaptchaWithAI(page: Page): Promise<boolean> {
 
 /**
  * Call Claude CLI to analyze a captcha screenshot.
+ * Uses the same pipe approach as callClaudeCli (which works in Docker).
  * Returns array of 1-based cell numbers to click.
  */
 async function askClaudeForCaptchaSolution(screenshotPath: string): Promise<number[]> {
-  const prompt = `Look at this screenshot: ${screenshotPath}
+  const prompt = `Read the image file at ${screenshotPath} and analyze it.
 
-There is a visual CAPTCHA overlay (Arkose FunCaptcha) on the screen. It shows:
+There is a visual CAPTCHA overlay on the screen. It shows:
 - An instruction text at the top (e.g., "Pick all the objects a human can lift by hand", "Select all images with X", "Match the image", etc.)
 - A grid of images (typically 2x3 = 6 cells, or 3x3 = 9 cells)
 
@@ -374,43 +383,78 @@ Number the grid cells starting from 1, going left-to-right, top-to-bottom:
 Return ONLY a JSON object: {"clicks": [cell_numbers_to_click]}
 Example: {"clicks": [1, 3, 5]}`;
 
+  // Write prompt to temp file (same approach as callClaudeCli which works)
+  const tmpFile = path.join(tmpdir(), `captcha-${nanoid(8)}.txt`);
+  await writeFile(tmpFile, prompt, 'utf-8');
+
   try {
-    const { stdout } = await execFileAsync('claude', [
-      '-p', prompt,
-      '--allowedTools', 'Read',
-      '--output-format', 'json',
-      '--model', 'sonnet',
-    ], {
-      timeout: 30_000,
-      env: { ...process.env, CLAUDECODE: '' }, // Allow nested CLI
-    });
+    const result = await runClaudeSolver(tmpFile);
+    logger.info({ result: result.slice(0, 300) }, 'Claude captcha solver raw output');
 
-    // Parse Claude's JSON output
-    const response = JSON.parse(stdout) as { result?: string; is_error?: boolean };
-    if (response.is_error || !response.result) {
-      logger.warn({ response: stdout.slice(0, 200) }, 'Claude CLI returned error');
-      return [];
-    }
-
-    // Extract clicks array from the response text
-    const match = response.result.match(/\{"clicks"\s*:\s*\[[\d,\s]+\]\}/);
+    // Extract clicks from response
+    const match = result.match(/\{"clicks"\s*:\s*\[[\d,\s]+\]\}/);
     if (match) {
       const parsed = JSON.parse(match[0]) as { clicks: number[] };
       return parsed.clicks;
     }
 
-    // Try to find any array of numbers
-    const arrayMatch = response.result.match(/\[[\d,\s]+\]/);
+    const arrayMatch = result.match(/\[[\d,\s]+\]/);
     if (arrayMatch) {
       return JSON.parse(arrayMatch[0]) as number[];
     }
 
-    logger.warn({ result: response.result.slice(0, 300) }, 'Could not parse clicks from Claude response');
+    logger.warn({ result: result.slice(0, 300) }, 'Could not parse clicks from Claude response');
     return [];
   } catch (err) {
     logger.error({ error: String(err) }, 'Claude CLI captcha analysis failed');
     return [];
+  } finally {
+    await unlink(tmpFile).catch(() => undefined);
   }
+}
+
+function runClaudeSolver(promptFile: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    // Clean env (strip Claude Code session markers to avoid nested detection)
+    const cleanEnv: Record<string, string> = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value === undefined) continue;
+      if (key === 'CLAUDECODE' || key.startsWith('CLAUDE_CODE_')) continue;
+      cleanEnv[key] = value;
+    }
+
+    const cmd = `cat '${promptFile}' | claude -p - --allowedTools Read --output-format text --max-turns 5 --model sonnet`;
+    const proc = spawn('bash', ['-c', cmd], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: cleanEnv,
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+    proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+
+    const timer = setTimeout(() => {
+      proc.kill('SIGTERM');
+      reject(new Error('Claude captcha solver timed out after 60s'));
+    }, 60_000);
+
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        logger.error({ code, stderr: stderr.slice(0, 500) }, 'Claude captcha solver error');
+        reject(new Error(`Claude solver exited with code ${code}: ${stderr.slice(0, 300)}`));
+        return;
+      }
+      resolve(stdout.trim());
+    });
+
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      reject(new Error(`Failed to spawn claude: ${err.message}`));
+    });
+  });
 }
 
 /**

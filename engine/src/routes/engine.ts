@@ -1,6 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import type { Server as SocketIOServer } from 'socket.io';
 import { getPipeline } from '../services/pipeline.js';
+import { SunoApiGenerator } from '../suno/api-generator.js';
+import { downloadAudio } from '../suno/downloader.js';
+import { getConfig } from '../config.js';
+import { logger } from '../utils/logger.js';
+import path from 'path';
+import { mkdirSync } from 'fs';
 
 // Engine state
 let engineStatus: 'stopped' | 'starting' | 'running' | 'paused' | 'error' = 'stopped';
@@ -79,5 +85,51 @@ export function registerEngineRoutes(fastify: FastifyInstance, io: SocketIOServe
     pipeline.stopStream();
     io.emit('stream:status-changed', { isStreaming: false });
     return { status: 'stopped' };
+  });
+
+  // ── Test: single song generation via API ─────────────────────────────────
+  fastify.post('/api/v1/test/single-song', async (_req, reply) => {
+    logger.info('=== SINGLE SONG API TEST START ===');
+
+    try {
+      const generator = new SunoApiGenerator();
+      const credits = await generator.getCredits().catch(() => -1);
+      logger.info({ credits }, 'Suno API credits');
+
+      const t = Date.now();
+
+      const results = await generator.generate({
+        style: 'country rock, twangy guitar, steady drums, patriotic anthem',
+        lyrics: `[Verse]\nSteel rain falling from the sky tonight\nBomber jets blazing through the fading light\nOld glory waving on the desert ground\nFreedom has a heavy sound\n\n[Chorus]\nSteel rain falling down on foreign land\nUncle Sam extending his iron hand\nYou can run but you will never hide\nSteel rain falling on the other side`,
+        title: 'Steel Rain Test',
+      });
+
+      // Download the first result
+      const config = getConfig();
+      const today = new Date().toISOString().slice(0, 10);
+      const dir = path.join(config.MEDIA_DIR, 'songs', today);
+      mkdirSync(dir, { recursive: true });
+
+      const downloaded = [];
+      for (const result of results) {
+        const outPath = path.join(dir, `test-${result.clipId}.mp3`);
+        await downloadAudio(result.audioUrl, outPath);
+        downloaded.push({ clipId: result.clipId, audioUrl: result.audioUrl, filePath: outPath, duration: result.duration });
+      }
+
+      const elapsed = ((Date.now() - t) / 1000).toFixed(1);
+      logger.info({ songs: downloaded.length, elapsed }, '=== SINGLE SONG API TEST SUCCESS ===');
+
+      return {
+        status: 'success',
+        songs: downloaded,
+        elapsedSeconds: elapsed,
+        creditsRemaining: credits,
+      };
+    } catch (err) {
+      logger.error({ error: String(err) }, '=== SINGLE SONG API TEST FAILED ===');
+      reply.status(500);
+      return { error: String(err) };
+    }
   });
 }

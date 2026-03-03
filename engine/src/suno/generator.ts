@@ -108,6 +108,30 @@ export class SunoGenerator {
     await this.clickCreate(page);
     logger.info('Create clicked, waiting for clip ID from network...');
 
+    // Screenshot immediately after Create click
+    await sleep(2000);
+    await page.screenshot({ path: './media/debug/after-create-2s.png' }).catch(() => {});
+    logger.info('Screenshot saved: after-create-2s.png');
+
+    // Screenshot 15s after Create click to see if generation started or error appeared
+    setTimeout(async () => {
+      await page.screenshot({ path: './media/debug/after-create-15s.png' }).catch(() => {});
+      logger.info('Screenshot saved: after-create-15s.png');
+      // Also log the page URL and check for error toasts / modals
+      const url = page.url();
+      const bodyText = await page.evaluate(() => {
+        const doc = (globalThis as any).document;
+        // Look for error toasts, modals, or alert messages
+        const toasts = doc.querySelectorAll('[role="alert"], [class*="toast"], [class*="error"], [class*="modal"]');
+        const texts: string[] = [];
+        for (const t of toasts) {
+          if (t.textContent?.trim()) texts.push(t.textContent.trim().slice(0, 200));
+        }
+        return texts.join(' | ') || '(no alerts/toasts found)';
+      }).catch(() => '(evaluate failed)');
+      logger.info({ url, alerts: bodyText }, 'Page state 15s after Create click');
+    }, 13_000);
+
     // Periodically check for captcha DURING the clip ID wait.
     // Captcha can appear 5-30s after Create click, so a one-time check isn't enough.
     const captchaWatchTimer = setInterval(async () => {
@@ -316,14 +340,54 @@ export class SunoGenerator {
   }
 
   private async clickCreate(page: Page): Promise<void> {
-    // Suno v5: "Create" button at the bottom of the form
-    const createBtn = page.locator('button:has-text("Create")').first();
-    const visible = await createBtn.isVisible({ timeout: 5_000 }).catch(() => false);
+    // Suno v5: The main Create button is the large gradient button at bottom of the form.
+    // IMPORTANT: Avoid matching the sidebar "+ Create" navigation button!
+    // The form Create button is wider, has gradient styling, and contains a music icon.
+    const selectors = [
+      // Large gradient Create button (unique to the form)
+      'button:has-text("Create"):not(:has-text("+ Create"))',
+      // Fallback: look for the button with gradient/colored background near form bottom
+      'button[class*="gradient"]:has-text("Create")',
+      'button[class*="bg-"]:has-text("Create")',
+    ];
 
-    if (visible) {
-      await createBtn.click();
-      logger.debug('Create button clicked');
-      await sleep(3_000); // Wait for generation to start
+    // Find ALL buttons with "Create" text and log them for debugging
+    const allCreateBtns = await page.locator('button:has-text("Create")').all();
+    for (let i = 0; i < allCreateBtns.length; i++) {
+      const btn = allCreateBtns[i];
+      const text = await btn.textContent().catch(() => '?');
+      const vis = await btn.isVisible().catch(() => false);
+      const disabled = await btn.isDisabled().catch(() => false);
+      const cls = await btn.getAttribute('class').catch(() => '?');
+      const box = await btn.boundingBox().catch(() => null);
+      logger.info(
+        { index: i, text: text?.trim(), visible: vis, disabled, class: cls?.slice(0, 80), box },
+        'Found Create button candidate',
+      );
+    }
+
+    // Pick the LAST visible "Create" button — form buttons come after nav buttons in DOM
+    for (let i = allCreateBtns.length - 1; i >= 0; i--) {
+      const btn = allCreateBtns[i];
+      const vis = await btn.isVisible().catch(() => false);
+      if (!vis) continue;
+      const text = await btn.textContent().catch(() => '');
+      // Skip the sidebar "+ Create" nav button
+      if (text?.includes('+ Create')) {
+        logger.debug({ index: i, text }, 'Skipping sidebar Create button');
+        continue;
+      }
+
+      const isDisabled = await btn.isDisabled().catch(() => false);
+      logger.info({ index: i, text: text?.trim(), isDisabled }, 'Clicking form Create button');
+
+      if (isDisabled) {
+        logger.warn('Create button is DISABLED — form may not be filled correctly');
+      }
+
+      await btn.click();
+      logger.info('Create button clicked');
+      await sleep(3_000);
       return;
     }
 
