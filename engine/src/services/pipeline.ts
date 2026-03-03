@@ -32,8 +32,8 @@ const CYCLE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 /** Max concurrent Suno API requests (API limit: 20 req / 10s, but we stay conservative) */
 const SUNO_CONCURRENCY = 2;
 
-/** News block (TTS) interval */
-const NEWS_BLOCK_INTERVAL_MS = 15 * 60 * 1000;
+/** News block (TTS) interval — one per hour, played at :45 slot */
+const NEWS_BLOCK_INTERVAL_MS = 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -102,6 +102,8 @@ export class Pipeline {
   private readonly playedArchive: AudioBufferEntry[] = [];
   /** Position in the archive for round-robin replay */
   private archivePosition = 0;
+  /** Most recent podcast — used for repeat in :50 slot when no new podcast available */
+  private lastPodcast: AudioBufferEntry | null = null;
 
   private running = false;
   private pendingGeneration = 0;
@@ -198,30 +200,87 @@ export class Pipeline {
   }
 
   /**
-   * Get next track to play.
-   * Priority: new tracks from buffer first, then loop through archive.
+   * Get next track to play using radio-style hourly time slots:
+   *   :00-:45 — Songs
+   *   :45-:50 — News block
+   *   :50-:60 — Podcast (repeat last if no new one)
    */
   dequeueAudio(): AudioBufferEntry | null {
-    // 1. Fresh tracks have priority
-    if (this.audioBuffer.length > 0) {
-      const track = this.audioBuffer.shift()!;
-      // Archive songs and podcasts for replay (not news blocks — those are time-sensitive)
+    const minuteOfHour = new Date().getMinutes();
+
+    let track: AudioBufferEntry | null = null;
+
+    if (minuteOfHour >= 50) {
+      // :50-:60 → Podcast slot
+      track = this.getTrackByType('podcast')
+        ?? this.lastPodcast  // repeat the most recent podcast
+        ?? this.getTrackByType('song');
+    } else if (minuteOfHour >= 45) {
+      // :45-:50 → News slot
+      track = this.getTrackByType('news_block')
+        ?? this.getTrackByType('song');
+    } else {
+      // :00-:45 → Song slot
+      track = this.getTrackByType('song')
+        ?? this.getAnyTrack();
+    }
+
+    if (track) {
+      this.updatePlayCount(track.id);
+    }
+
+    return track;
+  }
+
+  /**
+   * Find and dequeue a track of the requested type.
+   * Checks fresh buffer first, then archive for songs/podcasts.
+   */
+  private getTrackByType(type: AudioBufferEntry['type']): AudioBufferEntry | null {
+    // 1. Check fresh buffer
+    const idx = this.audioBuffer.findIndex((t) => t.type === type);
+    if (idx !== -1) {
+      const [track] = this.audioBuffer.splice(idx, 1);
+      // Archive songs and podcasts for replay (not news blocks — they're time-sensitive)
       if (track.type === 'song' || track.type === 'podcast') {
         this.playedArchive.push(track);
       }
-      this.updatePlayCount(track.id);
       return track;
     }
 
-    // 2. Loop through archive when no new tracks
-    if (this.playedArchive.length === 0) {
-      return null;
+    // 2. For songs/podcasts, loop through archive
+    if (type === 'song' || type === 'podcast') {
+      const matching = this.playedArchive.filter((t) => t.type === type);
+      if (matching.length > 0) {
+        // Use archivePosition for round-robin among matching type
+        const track = matching[this.archivePosition % matching.length];
+        this.archivePosition++;
+        return track;
+      }
     }
 
-    const track = this.playedArchive[this.archivePosition % this.playedArchive.length];
-    this.archivePosition++;
-    this.updatePlayCount(track.id);
-    return track;
+    return null;
+  }
+
+  /**
+   * Get any available track (fallback when preferred type not available).
+   */
+  private getAnyTrack(): AudioBufferEntry | null {
+    if (this.audioBuffer.length > 0) {
+      const track = this.audioBuffer.shift()!;
+      if (track.type === 'song' || track.type === 'podcast') {
+        this.playedArchive.push(track);
+      }
+      return track;
+    }
+
+    if (this.playedArchive.length > 0) {
+      const track = this.playedArchive[this.archivePosition % this.playedArchive.length];
+      this.archivePosition++;
+      return track;
+    }
+
+    return null;
   }
 
   peekBuffer(): AudioBufferEntry[] {
@@ -310,6 +369,11 @@ export class Pipeline {
         this.playedArchive.push(entry);
       }
       // Skip old news_blocks — they're stale
+
+      // Track the most recent podcast for :50 slot repeat
+      if (row.type === 'podcast' && !this.lastPodcast) {
+        this.lastPodcast = entry; // rows are ordered by createdAt DESC
+      }
 
       restored++;
     }
@@ -509,8 +573,8 @@ export class Pipeline {
           createdAt: episode.generatedAt,
         };
 
-        // Insert podcast at the beginning of the buffer so it plays first
-        this.audioBuffer.unshift(entry);
+        this.audioBuffer.push(entry);
+        this.lastPodcast = entry;
         this.persistTrack(entry);
         this.totalPodcastsGenerated++;
         podcastsProduced = 1;
@@ -716,9 +780,7 @@ export class Pipeline {
         createdAt: new Date(),
       };
 
-      // Insert after first 3 songs so it breaks up the music
-      const insertPosition = Math.min(3, this.audioBuffer.length);
-      this.audioBuffer.splice(insertPosition, 0, entry);
+      this.audioBuffer.push(entry);
       this.persistTrack(entry);
       this.totalNewsBlocksGenerated++;
 

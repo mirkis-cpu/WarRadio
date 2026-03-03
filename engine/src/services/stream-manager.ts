@@ -110,8 +110,11 @@ export class StreamManager extends EventEmitter {
       this.currentTrack = track.title;
       this.tracksPlayed++;
 
+      const m = new Date().getMinutes();
+      const slot = m >= 50 ? 'podcast' : m >= 45 ? 'news' : 'songs';
+
       logger.info(
-        { title: track.title, type: track.type, track: this.tracksPlayed },
+        { title: track.title, type: track.type, track: this.tracksPlayed, slot },
         'Streaming track',
       );
 
